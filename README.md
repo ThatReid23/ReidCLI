@@ -1,12 +1,15 @@
 # ReidCLI
 
-
 Terminal-native personal intelligence and coding CLI with an agent-first runtime.
 
 A real runtime — not a chat wrapper. Sessions, tasks, tools, policy gates, and
-persistence are first-class. Built to grow into a durable operator surface.
+persistence are first-class. A genuine full-screen TUI (not an inline redraw
+hack) with a locked-to-bottom footer, scrollable history, collapsible
+reasoning/tool-call output, and a live "/" command menu. Built to grow into a
+durable operator surface.
 
-**Status:** Phase 5 complete (correctness fixes + real resume + interaction upgrade).
+**Status:** Phase 5 complete (correctness fixes + real resume + interaction
+upgrade), plus a full-screen TUI rewrite, web search, and workflows on top.
 See `docs/` for the architecture audit and phase plans.
 
 ---
@@ -16,7 +19,8 @@ See `docs/` for the architecture audit and phase plans.
 - **Python** 3.12+
 - **Typer** — CLI command surface
 - **Pydantic v2** — schemas and validation
-- **Rich** — terminal rendering (markdown, tables, panels, spinners)
+- **Rich** — terminal rendering (markdown, tables, panels)
+- **prompt_toolkit** — the full-screen TUI (layout, input, completion, mouse)
 
 ---
 
@@ -57,8 +61,56 @@ ok runtime importable; stub provider available
 reidcli
 ```
 
-Drops you into the interactive REPL with a fresh session. Type `/help` for commands,
-or just start talking. The stub provider is offline and exercisable without API keys.
+Drops you into the interactive TUI with a fresh session. Type `/` to see every
+available command with descriptions, or just start talking. The stub provider
+is offline and exercisable without API keys.
+
+---
+
+## The interactive TUI
+
+`reidcli` (with no subcommand, or `reidcli interactive`) launches a real
+full-screen `prompt_toolkit` application — the same style of terminal
+ownership as `vim`/`htop` (alternate screen; your native scrollback is
+untouched and restored exactly as it was on exit). Rich handles all the
+actual rendering (markdown, tables, panels); prompt_toolkit owns the screen,
+input, and layout around it.
+
+- **Locked-to-bottom footer** — a spinner row, the input box, and a status
+  line (app name · mode · model · effort · token/context-window usage ·
+  workspace · task count) are always pinned to the terminal's actual last
+  rows. The scrollable output pane fills everything above it.
+- **Mouse-wheel scroll** — scroll up to read history without losing your
+  place; new replies keep arriving below the fold instead of yanking you back
+  down. Scroll back to the bottom (or far enough) and it re-locks
+  automatically. (Hold **Shift** while click-dragging for native text
+  selection/copy — mouse support for scrolling means the terminal hands mouse
+  events to the app, and Shift is the standard bypass every terminal supports
+  for that.)
+- **Collapsible reasoning + tool calls (Ctrl+O)** — chain-of-thought shows as
+  a grayed-out `✻ Thought for Ns` line and each tool call as a one-line
+  `● tool(args) ok/error` summary, collapsed by default. `Ctrl+O` toggles
+  every collapsed block open at once to see the full detail.
+- **`/` completion menu** — type `/` for a live menu of every slash command
+  with its description (Tab/↓/↑ to navigate, Enter to accept); no need to run
+  `/help` first, though `/help` still works and shows the same list grouped
+  by category.
+- **Large/multi-line pastes collapse** to a placeholder like
+  `[Pasted text #1 +42 lines]` (same idea as Claude Code's own input box) —
+  the full text is still sent when you submit, only the box display is
+  compact.
+- **Keyboard shortcuts in the input box:**
+  - `↑` / `↓` — input history
+  - `←` / `→` — cycle reasoning effort (`low → medium → high → xhigh`) when
+    the box is empty; otherwise they move the cursor normally
+  - `Ctrl+O` — toggle collapsed/expanded reasoning + tool calls
+  - `Ctrl+C` — clear the current line; `Ctrl+D` — exit
+- **DeepReid trigger** — type `deepread`/`deep reid` (a few spellings
+  accepted) at the very start of the box: it pulses green, and your message
+  runs through the real Researcher→Planner→Critic pipeline instead of a
+  normal turn. See "DeepReid" under Tools/What works now below.
+- A small mascot renders next to the welcome banner on launch
+  (`render.py::banner`/`_MASCOT`) — purely cosmetic, easy to swap out.
 
 ---
 
@@ -68,11 +120,12 @@ or just start talking. The stub provider is offline and exercisable without API 
 
 | Command | Purpose |
 |---|---|
-| `reidcli` | Launch interactive mode (default — no subcommand needed) |
+| `reidcli` | Launch the interactive TUI (default — no subcommand needed) |
 | `reidcli interactive "<prompt>"` | Launch interactive mode and immediately submit `<prompt>` as the first turn — session stays open afterward |
 | `reidcli --file <path>` / `-f` | Same idea, but read the initial prompt from a text file — works with `interactive`, `exec`, and the bare/no-subcommand form |
 | `<cmd> \| reidcli` | Pipe a prompt via stdin as the initial turn (only applies to the bare/no-subcommand form) |
 | `reidcli exec "<prompt>"` | Run a single prompt non-interactively (headless) |
+| `reidcli deepreid "<task>"` | Plan + review `<task>` via the Researcher/Planner/Critic pipeline (headless, like `exec`) — no code changes, saves a Markdown plan |
 | `reidcli resume <session-id>` | Resume a prior session, then enter interactive mode |
 | `reidcli sessions` | List all sessions |
 | `reidcli config-show` | Show the effective (merged) configuration |
@@ -81,7 +134,10 @@ or just start talking. The stub provider is offline and exercisable without API 
 | `reidcli version` | Show version and runtime info |
 | `reidcli --help` | Show the command surface |
 
-### Slash commands (inside the REPL)
+### Slash commands (inside the TUI)
+
+Type `/` in the input box for a live completion menu of all of these with
+descriptions — the table below is the same information, grouped.
 
 **Session**
 
@@ -104,18 +160,32 @@ or just start talking. The stub provider is offline and exercisable without API 
 | Command | Purpose |
 |---|---|
 | `/model <name>` | Set the model for the session |
-| `/effort <level>` | Set reasoning effort: `low` `medium` `high` |
+| `/effort <level>` | Set reasoning effort: `low` `medium` `high` `xhigh` |
 | `/mode <mode>` | Set permission mode: `strict` `balanced` `autonomous` `custom` |
 | `/permissions` | Show current policy: mode, blocked/allowed commands, writable roots, timeouts |
 | `/tools` | List registered tools with risk-level badges |
+
+**Workflows**
+
+| Command | Purpose |
+|---|---|
+| `/workflows` | List saved workflows |
+| `/workflow save <name> [n]` | Save the last `n` user turns as a reusable workflow (default 5) |
+| `/workflow show <name>` | Show a workflow's steps |
+| `/workflow run <name>` | Run a workflow's steps in sequence — each step gets the same handling as typing it directly (slash commands and prompts both work, spinner/approval included) |
+| `/workflow delete <name>` | Delete a workflow |
+
+Workflows are global (not tied to a session or workspace) and persist to
+`~/.reidcli/workflows.json`, so a workflow saved in one session is runnable
+from any other.
 
 **Meta**
 
 | Command | Purpose |
 |---|---|
 | `/help` | Show grouped help |
-| `/clear` | Clear the screen |
-| `/exit` | Quit ReidCLI (also `Ctrl+D` or `Ctrl+C`) |
+| `/clear` | Clear the output pane |
+| `/exit` | Quit ReidCLI (also `Ctrl+D`; `Ctrl+C` clears the current input line) |
 
 ---
 
@@ -199,8 +269,26 @@ The agent loop calls tools through the registry. Each tool is policy-gated.
 | `find_files` | low | Find files matching a glob pattern |
 | `grep_files` | low | Search file contents with a regex |
 | `run_command` | high | Run a shell command with policy approval and timeout |
+| `web_search` | high | Search the web (DuckDuckGo, free, no API key) — see below |
 
 All file tools confine access to the workspace root. Traversal outside is denied.
+
+### `web_search`
+
+Free, no API key, stdlib-only (`urllib` + `re`). Two DuckDuckGo sources, tried
+in order:
+
+1. The official Instant Answer JSON API — fast (~0.3s), but only populated
+   for factual/entity queries ("what is X").
+2. The HTML-only search endpoint — slower and more exposed to DuckDuckGo's
+   anti-bot rate limiting, but covers general search queries the fast path
+   doesn't.
+
+Results are cached in-memory per session (5 minute TTL) so repeated queries
+don't re-hit the network. Sponsored/ad results are filtered out rather than
+surfaced as raw tracking links. Gated as `ActionKind.NETWORK` (HIGH risk by
+default) through the same policy engine as every other tool — expect an
+approval prompt in `balanced`/`strict` mode.
 
 ---
 
@@ -214,6 +302,12 @@ Each session gets a structured directory under `~/.reidcli/sessions/<id>/`:
   transcript.jsonl  # One Message per line (restorable into state on resume)
   tasks.json        # Task state for the session
   events.jsonl      # Runtime action log (turn summaries, lifecycle events)
+```
+
+Workflows live one level up, outside any single session:
+
+```
+~/.reidcli/workflows.json   # {"workflows": [{name, description, steps, created_at}, ...]}
 ```
 
 **Resume is real:** `reidcli resume <id>` reloads the transcript into the agent's
@@ -230,11 +324,12 @@ reidcli sessions
 
 ## Headless / exec mode
 
-Run a single prompt without entering the REPL:
+Run a single prompt without entering the TUI:
 
 ```powershell
 reidcli exec "list the current dir"
 reidcli exec "read README.md"
+reidcli exec --file prompt.txt
 ```
 
 Output goes to stdout; tool-call count goes to stderr. Exit code is `0` on success,
@@ -252,7 +347,7 @@ risky actions silently.
 pytest
 ```
 
-18 focused tests across policy, tools, session, and agent loop.
+24 focused tests across policy, tools, session, reasoning, and the agent loop.
 
 ### Lint
 
@@ -274,12 +369,14 @@ ReidCLI/
     tasks/       # Task model + store (state machine)
     policy/      # PermissionMode, decisions, risk, PolicyEngine
     provider/    # BaseProvider + StubProvider + registry
-    tools/       # ToolDefinition/Result, registry, file tools, shell tool
+    tools/       # ToolDefinition/Result, registry, file/shell/web-search tools
+    workflows/   # Workflow model + global WorkflowStore (~/.reidcli/workflows.json)
     runtime/     # RuntimeState, agent loop, orchestrator (composition root)
     integrations/# MCP foundation (config-driven, stubbed lifecycle)
     automation/  # exec mode (headless)
-    ui/          # theme, render, REPL, slash commands
-  tests/         # policy, tools, session, agent loop
+    ui/          # theme, render (Rich), app (full-screen prompt_toolkit TUI),
+                 # commands (slash-command routing + completion source), repl (entry point)
+  tests/         # policy, tools, session, reasoning, agent loop
   docs/          # architecture audit, phase plans
 ```
 
@@ -291,20 +388,35 @@ See the parent repo's design docs:
 - `agent-first-cli-spec.md` — generic agent-first CLI specification
 - `docs/reidcli-architecture-audit.md` — file-aware critique of this scaffold
 - `docs/reidcli-phase-5-plan.md` — correctness fixes + interaction upgrade
+- `../deepreid-spec.md` — spec for DeepReid, the planning/review multi-agent
+  subsystem, now implemented (see below)
 
 ---
 
 ## What works now
 
-- Interactive REPL with markdown-rendered output and spinner
+- Full-screen TUI (prompt_toolkit): locked-to-bottom footer, mouse-wheel
+  scrollable history, collapsible reasoning/tool-call output (`Ctrl+O`), live
+  `/` completion menu
 - Real agent loop with tool calls (StubProvider, no API keys needed)
 - Session create / list / resume with message history restoration
 - Task tracking with status state machine (pending → active → completed/failed)
 - Policy engine with 4 modes, path confinement, command allowlist/denylist
-- 7 tools (file read/write/patch/list/find/grep + shell) all policy-gated
+- 8 tools (file read/write/patch/list/find/grep + shell + free web search) all policy-gated
+- Workflows: save/list/show/run/delete reusable multi-step command sequences
+- **DeepReid** (`src/reidcli/deepreid/`): a real Researcher→Planner→Critic
+  subagent pipeline — each role is an independent `Agent`/`PolicyEngine`
+  (Planner/Critic get zero tools; Researcher gets read-only file tools +
+  `web_search` only), sequential, with a Critic-driven revision loop capped
+  at 2 rounds. Never writes files or runs commands — output is a Markdown
+  plan+critique, saved to `~/.reidcli/deepreid/<run-id>.md`. Two entry
+  points: `reidcli deepreid "<task>"` (headless CLI, like `exec`) and typing
+  `deepread`/`deep reid` at the start of the TUI's input box (border pulses
+  green while active, real-time progress shown per stage).
+- Prompt injection at launch: literal argument, `--file`, or piped stdin
 - Headless exec mode
-- Structured persistence (meta / transcript / tasks / events per session)
-- 18 passing tests, ruff clean
+- Structured persistence (meta / transcript / tasks / events per session; global workflows and DeepReid runs)
+- 28 passing tests, ruff clean
 
 ## What is stubbed (extension-ready)
 
@@ -312,7 +424,9 @@ See the parent repo's design docs:
 - **MCP** — config schema + lifecycle slots; stdio/JSON-RPC is TODO
 - **Patch tool** — single exact-match replace; structured edits + diff preview TODO
 - **Automation** — one-shot exec; scheduling/background TODO
-- **Subagents** — not yet implemented (Phase 9)
+- **DeepReid Builder role** — a subagent that actually implements an
+  approved plan is explicitly out of scope for v1 (per `../deepreid-spec.md`);
+  building is still the regular single-agent loop, or a human, for now.
 
 ---
 

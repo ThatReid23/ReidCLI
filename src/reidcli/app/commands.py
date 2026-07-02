@@ -16,8 +16,10 @@ from reidcli import __version__
 from reidcli.automation.exec import exec_run
 from reidcli.config.loader import ConfigLoader
 from reidcli.config.models import Config
+from reidcli.deepreid import format_markdown, run_deepreid, save_deepreid_result
 from reidcli.diagnostics.logger import get_logger
 from reidcli.provider.registry import default_registry
+from reidcli.provider.store import load_into as load_stored_providers
 from reidcli.runtime.orchestrator import Orchestrator
 from reidcli.tools import default_registry as tools_registry
 from reidcli.ui import render
@@ -40,6 +42,7 @@ _PROMPT_ARG_HELP = (
     "terminal (piped input), stdin is read as the prompt instead."
 )
 _PROMPT_FILE_HELP = "Read the prompt from a text file instead of the command line (e.g. a long or multi-line prompt)."
+_NYX_HELP = "Launch in Nyx mode: a redteam/offensive-security assistant persona for authorized pentesting and CTF work."
 
 
 def _stdin_prompt() -> str | None:
@@ -72,6 +75,7 @@ def _resolve_prompt(prompt: str | None, prompt_file: Path | None, *, fall_back_t
 def _main(
     ctx: typer.Context,
     prompt_file: Path | None = typer.Option(None, "--file", "-f", help=_PROMPT_FILE_HELP),
+    nyx: bool = typer.Option(False, "--nyx", help=_NYX_HELP),
 ) -> None:
     """With no subcommand, launch interactive mode."""
     # No positional prompt argument here on purpose: a Typer/Click group with
@@ -84,37 +88,72 @@ def _main(
     # empty (or reads piped stdin), as before.
     if ctx.invoked_subcommand is None:
         initial = _resolve_prompt(None, prompt_file, fall_back_to_stdin=True)
-        repl(build_orchestrator(), initial_prompt=initial)
+        orch = build_orchestrator()
+        if nyx:
+            orch.set_nyx(True)
+        repl(orch, initial_prompt=initial)
 
 
 def build_orchestrator(config: Config | None = None) -> Orchestrator:
     cfg = config or ConfigLoader().load()
     providers = default_registry(cfg)
-    provider = providers.get(cfg.default_provider)
-    return Orchestrator(cfg, provider, tools_registry())
+    load_stored_providers(providers, cfg.storage_root or (Path.home() / ".reidcli"))
+    # `/connect` may have persisted a provider that isn't yet `cfg.default_provider`.
+    # We never auto-promote — stub stays default unless the user did `/use` last
+    # session (that's a session setting, not a config change). Fall back to stub
+    # if the configured default isn't registered.
+    default_name = cfg.default_provider if providers.has(cfg.default_provider) else "stub"
+    provider = providers.get(default_name)
+    return Orchestrator(cfg, provider, tools_registry(), providers=providers)
 
 
 @app.command()
 def interactive(
     prompt: str | None = typer.Argument(None, help=_PROMPT_ARG_HELP),
     prompt_file: Path | None = typer.Option(None, "--file", "-f", help=_PROMPT_FILE_HELP),
+    nyx: bool = typer.Option(False, "--nyx", help=_NYX_HELP),
 ) -> None:
     """Launch interactive mode (default)."""
     initial = _resolve_prompt(prompt, prompt_file, fall_back_to_stdin=True)
-    repl(build_orchestrator(), initial_prompt=initial)
+    orch = build_orchestrator()
+    if nyx:
+        orch.set_nyx(True)
+    repl(orch, initial_prompt=initial)
 
 
 @app.command(name="exec")
 def exec_(
     prompt: str | None = typer.Argument(None, help="Prompt to run non-interactively."),
     prompt_file: Path | None = typer.Option(None, "--file", "-f", help=_PROMPT_FILE_HELP),
+    nyx: bool = typer.Option(False, "--nyx", help=_NYX_HELP),
 ) -> None:
     """Run a single prompt non-interactively (headless)."""
     resolved = _resolve_prompt(prompt, prompt_file, fall_back_to_stdin=False)
     if not resolved:
         render.print_error("usage: reidcli exec \"<prompt>\" (or --file <path>)")
         raise typer.Exit(code=1)
-    raise typer.Exit(code=exec_run(build_orchestrator(), resolved))
+    orch = build_orchestrator()
+    if nyx:
+        orch.set_nyx(True)
+    raise typer.Exit(code=exec_run(orch, resolved))
+
+
+@app.command()
+def deepreid(
+    task: str | None = typer.Argument(None, help=_PROMPT_ARG_HELP),
+    prompt_file: Path | None = typer.Option(None, "--file", "-f", help=_PROMPT_FILE_HELP),
+) -> None:
+    """Plan + review a task via Researcher/Planner/Critic subagents (no code changes)."""
+    resolved = _resolve_prompt(task, prompt_file, fall_back_to_stdin=True)
+    if not resolved:
+        render.print_error('usage: reidcli deepreid "<task>" (or --file <path>)')
+        raise typer.Exit(code=1)
+    cfg = ConfigLoader().load()
+    provider = default_registry(cfg).get(cfg.default_provider)
+    result = run_deepreid(cfg, provider, Path.cwd(), resolved, on_progress=render.print_info)
+    path = save_deepreid_result(cfg, result)
+    console.print(format_markdown(result))
+    render.print_info(f"saved to {path}")
 
 
 @app.command()

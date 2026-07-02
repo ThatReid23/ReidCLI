@@ -6,13 +6,16 @@ session, task, agent, and policy meet — UI and automation layers call into it.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from reidcli.config.models import Config
 from reidcli.diagnostics.logger import get_logger
+from reidcli.nyx import NYX_SYSTEM_PROMPT
 from reidcli.policy.engine import PolicyEngine
 from reidcli.provider.base import BaseProvider
-from reidcli.runtime.agent import Agent
+from reidcli.provider.registry import ProviderRegistry
+from reidcli.runtime.agent import BASE_SYSTEM_PROMPT, Agent
 from reidcli.runtime.state import RuntimeState
 from reidcli.session.models import Session, SessionStatus
 from reidcli.session.store import SessionStore
@@ -20,6 +23,7 @@ from reidcli.tasks.models import TaskStatus
 from reidcli.tasks.store import TaskStore
 from reidcli.tools.base import Approver
 from reidcli.tools.registry import ToolRegistry
+from reidcli.workflows.store import WorkflowStore
 
 log = get_logger("reidcli.runtime")
 
@@ -30,14 +34,49 @@ class Orchestrator:
         config: Config,
         provider: BaseProvider,
         tools: ToolRegistry,
+        providers: ProviderRegistry | None = None,
     ) -> None:
         self.config = config
         self.provider = provider
         self.tools = tools
+        self.providers = providers
         self.policy = PolicyEngine(config)
         self.session_store = SessionStore(config.storage_root or (Path.home() / ".reidcli"))
-        self.agent = Agent(provider, tools, self.policy)
+        self.workflow_store = WorkflowStore(config.storage_root or (Path.home() / ".reidcli"))
+        # Subagent runtime (spawn_agent tool + TUI panel subscribe to this).
+        # Imported lazily to avoid an import cycle: tools/spawn_agent constructs
+        # a child Agent using the registries held here.
+        from reidcli.runtime.subagent import SubagentManager  # noqa: PLC0415
+        self.subagents = SubagentManager()
+        self.agent = Agent(provider, tools, self.policy, context_extras={"orchestrator": self})
         self.state: RuntimeState | None = None
+        self.nyx_enabled = False
+
+    def use_provider(self, name: str) -> BaseProvider:
+        """Session-scoped provider swap. Rebuilds the Agent so subsequent turns
+        route through the new provider. Persistent default (`config.default_provider`)
+        is intentionally NOT changed — stub stays default across restarts unless
+        explicitly asked via a future --set-default flag."""
+        if self.providers is None:
+            raise RuntimeError("no provider registry attached")
+        provider = self.providers.get(name)
+        self.provider = provider
+        self.agent = Agent(
+            provider,
+            self.tools,
+            self.policy,
+            base_system_prompt=NYX_SYSTEM_PROMPT if self.nyx_enabled else BASE_SYSTEM_PROMPT,
+            context_extras={"orchestrator": self},
+        )
+        if self.state is not None:
+            self.state.session.provider = name
+            prov_cfg = self.config.providers.get(name)
+            if prov_cfg and prov_cfg.default_model:
+                self.state.session.model = prov_cfg.default_model
+            elif getattr(provider, "default_model", ""):
+                self.state.session.model = provider.default_model
+            self.session_store.update(self.state.session)
+        return provider
 
     def start_session(self, title: str = "") -> Session:
         workspace = (self.config.workspace_root or Path.cwd()).resolve()
@@ -80,8 +119,15 @@ class Orchestrator:
         *,
         approver: Approver | None = None,
         title: str | None = None,
+        cancel: Callable[[], bool] | None = None,
     ) -> dict:
-        """Run one user turn against the agent, tracking it as a Task."""
+        """Run one user turn against the agent, tracking it as a Task.
+
+        `cancel`, if given, is forwarded to `Agent.run_turn` and polled at
+        safe points so a user-triggered stop (e.g. Escape in the TUI) ends
+        the turn with whatever partial answer/tool results it already has,
+        instead of running to completion.
+        """
         if self.state is None:
             raise RuntimeError("no active session; call start_session first")
         store = self.task_store()
@@ -93,7 +139,7 @@ class Orchestrator:
         pre_turn_count = len(self.state.messages)
         writable_roots = [r.resolve() for r in self.config.policy.additional_writable_roots]
         final_text, tool_log = self.agent.run_turn(
-            self.state, user_input, writable_roots=writable_roots, approver=approver
+            self.state, user_input, writable_roots=writable_roots, approver=approver, cancel=cancel
         )
 
         # Persist new messages incrementally for restorable resume.
@@ -107,9 +153,12 @@ class Orchestrator:
         )
 
         # Derive task status from the turn outcome.
+        cancelled = final_text.startswith("[cancelled by user]")
         exhausted = final_text.startswith("[agent] step budget exhausted")
         all_tools_failed = bool(tool_log) and not any(entry["ok"] for entry in tool_log)
-        if exhausted or all_tools_failed:
+        if cancelled:
+            store.update_status(task.id, TaskStatus.SKIPPED, summary=final_text[:200])
+        elif exhausted or all_tools_failed:
             store.update_status(task.id, TaskStatus.FAILED, error=final_text[:200])
         else:
             store.update_status(task.id, TaskStatus.COMPLETED, summary=final_text[:200])
@@ -125,6 +174,19 @@ class Orchestrator:
         if self.state is None:
             return []
         return self.task_store().list()
+
+    def set_nyx(self, enabled: bool) -> None:
+        """Toggle Nyx (redteam/offensive-security) persona. Rebuilds the Agent
+        with the swapped system prompt; tool registry and policy engine are
+        untouched — those are the actual safety boundary, not the prompt."""
+        self.nyx_enabled = enabled
+        self.agent = Agent(
+            self.provider,
+            self.tools,
+            self.policy,
+            base_system_prompt=NYX_SYSTEM_PROMPT if enabled else BASE_SYSTEM_PROMPT,
+            context_extras={"orchestrator": self},
+        )
 
     def set_permission_mode(self, mode) -> None:  # type: ignore[no-untyped-def]
         # Single source of truth: update policy engine + session + persist.

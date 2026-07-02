@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 from reidcli.config.models import Config, default_config
-from reidcli.config.settings import apply_settings_env
+from reidcli.config.settings import apply_settings_env, read_reidcli_block
 from reidcli.diagnostics.logger import get_logger
 
 log = get_logger("reidcli.config")
@@ -74,6 +74,10 @@ class ConfigLoader:
         data = default_config().model_dump(mode="json")
         data = _deep_merge(data, _read_json(self.global_dir / CONFIG_FILENAME))
         data = _deep_merge(data, _read_json(self.project_dir / CONFIG_FILENAME))
+        # Claude-Code-shaped settings.json (`reidcli` block) — sits above
+        # .reidcli/config.json so the project's baked-in settings file wins
+        # over an older on-disk config; env vars still win over both.
+        data = _deep_merge(data, read_reidcli_block())
         data = _deep_merge(data, _env_overrides())
 
         cfg = Config.model_validate(data)

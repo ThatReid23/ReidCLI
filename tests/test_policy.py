@@ -37,10 +37,14 @@ def test_autonomous_mode_allows_low_and_medium(tmp_path: Path) -> None:
 
 
 def test_path_confined_to_workspace(tmp_path: Path) -> None:
+    """Paths inside the workspace go through the mode's normal risk gate;
+    paths outside prompt for approval (yes/no) rather than hard-denying, so
+    one-off cross-project reads / writes can be allowed without editing the
+    config. Explicit read_only_paths still hard-deny (covered elsewhere)."""
     eng = _engine(PermissionMode.AUTONOMOUS, tmp_path)
     assert eng.check_path(tmp_path / "file.txt", write=True) is PermissionDecision.ALLOW
-    assert eng.check_path(Path("/etc/passwd"), write=True) is PermissionDecision.DENY
-    assert eng.check_path(tmp_path.parent / "outside.txt", write=True) is PermissionDecision.DENY
+    assert eng.check_path(Path("/etc/passwd"), write=True) is PermissionDecision.PROMPT
+    assert eng.check_path(tmp_path.parent / "outside.txt", write=True) is PermissionDecision.PROMPT
 
 
 def test_blocked_commands_always_denied(tmp_path: Path) -> None:

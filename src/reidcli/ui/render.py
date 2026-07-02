@@ -88,8 +88,30 @@ def _bullet_grid(marker: Text, body) -> Table:  # type: ignore[no-untyped-def]
     return grid
 
 
+# Mascot ASCII art, printed to the left of the welcome panel in the empty
+# space there. Purely decorative — kept as its own constant so it's easy to
+# swap out.
+_MASCOT = r"""                 #####
+            ###############
+         ######################
+       ##########################
+      ##########  ##  ###########
+    ##### ####   ##################
+   ######      #####################
+  ### ##         ###################
+  ####### ###   #####################
+ ############################### ####
+ ############### ###################
+ ## ## ## ###################  #####
+    ##   ##  ################## ####
+   #          ############### ##  ##
+               ##### ### ### ##  ##
+                 ##   ## ##  ##
+                  ##   ##    ##"""
+
+
 def banner() -> None:
-    """Claude-Code-style welcome box."""
+    """Claude-Code-style welcome box, with a mascot to its left."""
     from reidcli import __version__
 
     body = Text.assemble(
@@ -102,7 +124,13 @@ def banner() -> None:
         ("  cwd: ", DIM),
         (str(Path.cwd()), DIM),
     )
-    console.print(Panel(body, box=BOX, border_style=PRIMARY, padding=(0, 1), width=MAX_WIDTH))
+    panel = Panel(body, box=BOX, border_style=PRIMARY, padding=(0, 1), width=MAX_WIDTH)
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column()
+    grid.add_column()
+    grid.add_row(Text(_MASCOT, style=PRIMARY), panel)
+    console.print(grid)
 
 
 def status_line_text(status: dict) -> Text:
@@ -158,11 +186,14 @@ def status_prompt(session: Session | None, mode: PermissionMode | None) -> Text:
 
 def print_user(text: str) -> None:
     """Echo the submitted prompt after the input box collapses, under a small
-    "User" label, with blank lines before/after to separate it from whatever
-    came before (the prior reply) and after (this turn's reply)."""
+    "User" label, with extra blank lines before/after to clearly separate it
+    from whatever came before (the prior reply) and after (this turn's
+    reply)."""
+    console.print()
     console.print()
     console.print(Text("  User", style=DIM))
     console.print(Text.assemble((f"{PROMPT} ", f"bold {PRIMARY}"), (text, "bold")))
+    console.print()
     console.print()
 
 
@@ -247,6 +278,48 @@ def print_sessions(sessions: list[Session]) -> None:
             str(s.workspace),
         )
     console.print(table)
+
+
+def print_workflows(workflows: list) -> None:  # type: ignore[no-untyped-def]
+    if not workflows:
+        console.print(Text("no workflows", style=DIM))
+        return
+    table = Table(title="workflows", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=MAX_WIDTH)
+    table.add_column("name", style="bold", width=18)
+    table.add_column("steps", width=6)
+    table.add_column("description")
+    for wf in workflows:
+        table.add_row(wf.name, str(len(wf.steps)), wf.description or "(none)")
+    console.print(table)
+
+
+def print_workflow_steps(workflow) -> None:  # type: ignore[no-untyped-def]
+    console.print(Text.assemble((workflow.name, f"bold {PRIMARY}"), ("  ", ""), (workflow.description, DIM)))
+    for i, step in enumerate(workflow.steps, 1):
+        console.print(Text.assemble((f"  {i}. ", DIM), (step, "white")))
+
+
+def print_providers(records, active_name: str, extra_names: list[str]) -> None:  # type: ignore[no-untyped-def]
+    """Show connected providers.
+
+    `records` is the persisted list (name, kind, base_url, default_model);
+    `extra_names` is any provider registered but not persisted (e.g. `stub`,
+    or `anthropic` picked up from env vars) — those show as kind=built-in.
+    `active_name` is the current session provider (highlighted).
+    """
+    table = Table(title="providers", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=MAX_WIDTH)
+    table.add_column("name", style="bold", width=18)
+    table.add_column("kind", width=20)
+    table.add_column("model", width=22)
+    table.add_column("base_url")
+    for name in extra_names:
+        marker = "● " if name == active_name else "  "
+        table.add_row(f"{marker}{name}", "built-in", "-", "-")
+    for r in records:
+        marker = "● " if r.name == active_name else "  "
+        table.add_row(f"{marker}{r.name}", r.kind, r.default_model or "-", r.base_url or "-")
+    console.print(table)
+    console.print(Text("  ● = active provider (use /use <name> to switch)", style=DIM))
 
 
 def print_permissions(policy: PolicyEngine) -> None:

@@ -71,15 +71,20 @@ class PolicyEngine:
         writable_roots = {workspace, *[r.resolve() for r in self.config.policy.additional_writable_roots]}
         read_only = {r.resolve() for r in self.config.policy.read_only_paths}
 
+        # Explicit read-only denylist still hard-denies — that list is the
+        # user's "never touch this" declaration, not a soft boundary.
         if any(resolved == ro or ro in resolved.parents for ro in read_only):
             return PermissionDecision.DENY
 
         inside_writable = any(resolved == root or root in resolved.parents for root in writable_roots)
-        if not inside_writable:
-            return PermissionDecision.DENY
-
         kind = ActionKind.FILE_WRITE if write else ActionKind.FILE_READ
-        return self.evaluate(kind, self.classify(kind))
+        if inside_writable:
+            return self.evaluate(kind, self.classify(kind))
+        # Outside the workspace: ask the user (yes/no) rather than hard-deny.
+        # Confinement stays the default (writable roots still frame what's
+        # "normal"), but a single approval prompt lets one-off cross-project
+        # reads / writes through without editing the config.
+        return PermissionDecision.PROMPT
 
     def check_command(self, command: str) -> PermissionDecision:
         tokens = command.strip().split()

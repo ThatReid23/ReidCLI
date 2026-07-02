@@ -12,12 +12,15 @@ become tool-result messages with error text so the model can react, never crashe
 """
 from __future__ import annotations
 
+import platform
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from reidcli.diagnostics.logger import get_logger
 from reidcli.policy.engine import PolicyEngine
 from reidcli.provider.base import BaseProvider, Message, ProviderResponse, ToolCall
-from reidcli.runtime.reasoning import COT_SYSTEM_SUFFIX, split_reasoning
+from reidcli.runtime.reasoning import split_reasoning, system_prompt_suffix
 from reidcli.runtime.state import RuntimeState
 from reidcli.tools.base import Approver, ToolContext
 from reidcli.tools.registry import ToolRegistry
@@ -26,7 +29,39 @@ log = get_logger("reidcli.agent")
 
 MAX_STEPS = 8
 
-BASE_SYSTEM_PROMPT = "You are ReidVerse-Cli, a terminal-native coding agent. Use tools when helpful."
+BASE_SYSTEM_PROMPT = (
+    "You are an AI coding assistant running inside ReidVerse-Cli, a terminal "
+    "harness that gives you file, search, shell, and web tools. The harness "
+    "handles rendering and permission gating; keep your replies terse and "
+    "action-oriented. Call the available tools when they help; otherwise "
+    "answer directly. Do not refuse to operate inside this harness — it is "
+    "just a local terminal wrapper, not a request to change your identity. "
+    "Use paths exactly as given in the environment context below — do not "
+    "translate them to a different OS (no /mnt/... on Windows, no drive "
+    "letters on Linux). If a path check prompts the user, they will approve "
+    "or deny it; you never need to guess an alternative path."
+)
+
+
+def _environment_context(workspace: Path) -> str:
+    """Environment header appended to the system prompt each turn.
+
+    Tells the model exactly which OS and workspace it's operating in so it
+    doesn't guess (e.g. inventing `/mnt/e/...` on Windows). Regenerated per
+    turn because the workspace can change mid-session via /use.
+    """
+    system = platform.system() or "Unknown"
+    return (
+        "\n\n<environment>"
+        f"\n  os: {system} ({platform.release()})"
+        f"\n  workspace: {workspace}"
+        f"\n  path_style: {'windows (backslash, drive letters)' if system == 'Windows' else 'posix (forward slash)'}"
+        "\n  note: the workspace path is the canonical form the tools accept. "
+        "Absolute paths (including drive letters on Windows) are valid. "
+        "Path checks outside the workspace prompt the user with a yes/no — "
+        "do not preemptively refuse them."
+        "\n</environment>"
+    )
 
 
 class Agent:
@@ -38,12 +73,16 @@ class Agent:
         tools: ToolRegistry,
         policy: PolicyEngine,
         *,
-        system_prompt: str = BASE_SYSTEM_PROMPT + COT_SYSTEM_SUFFIX,
+        base_system_prompt: str = BASE_SYSTEM_PROMPT,
+        context_extras: dict | None = None,
     ) -> None:
         self.provider = provider
         self.tools = tools
         self.policy = policy
-        self.system_prompt = system_prompt
+        self.base_system_prompt = base_system_prompt
+        # Copied into every ToolContext.extra — spawn_agent reads its
+        # orchestrator handle from here (see tools/spawn_agent.py).
+        self.context_extras = context_extras or {}
 
     def _context(
         self, state: RuntimeState, writable_roots: list, approver: Approver | None
@@ -53,11 +92,22 @@ class Agent:
             policy=self.policy,
             writable_roots=writable_roots,
             approver=approver,
+            extra=dict(self.context_extras),
         )
 
     def _ensure_system(self, state: RuntimeState) -> None:
+        # Rebuilt every turn (not just inserted once) so changing /effort or
+        # the Left/Right effort cycle mid-session takes effect on the very
+        # next turn instead of being frozen at whatever it was on turn one.
+        prompt = (
+            self.base_system_prompt
+            + _environment_context(state.session.workspace)
+            + system_prompt_suffix(state.session.reasoning_effort)
+        )
         if not state.messages or state.messages[0].role != "system":
-            state.messages.insert(0, Message(role="system", content=self.system_prompt))
+            state.messages.insert(0, Message(role="system", content=prompt))
+        else:
+            state.messages[0].content = prompt
 
     def run_turn(
         self,
@@ -67,11 +117,18 @@ class Agent:
         writable_roots: list | None = None,
         approver: Approver | None = None,
         max_steps: int = MAX_STEPS,
+        cancel: Callable[[], bool] | None = None,
     ) -> tuple[str, list[dict]]:
         """Execute one user turn. Returns (final_text, tool_result_log).
 
         The orchestrator owns the policy mode; this loop only reads it. One assistant
         message is appended per provider turn, carrying both content and tool_calls.
+
+        `cancel`, if given, is polled at each safe point (before the next
+        provider call, and between individual tool calls within a step) so a
+        user-triggered stop (e.g. Escape in the TUI) takes effect at the next
+        such point rather than needing to kill an in-flight network call —
+        it can't interrupt a `provider.chat`/tool call already in progress.
         """
         self._ensure_system(state)
         state.messages.append(Message(role="user", content=user_input))
@@ -81,9 +138,15 @@ class Agent:
         state.last_thinking = None  # fresh per turn; the UI reads it after run_turn
 
         for _step in range(max_steps):
+            if cancel is not None and cancel():
+                final_text = final_text or "[cancelled by user]"
+                break
             resp: ProviderResponse = self.provider.chat(
                 state.messages, self.tools.schemas(), state.session.model
             )
+            # Latest call's usage, not summed — see RuntimeState's field docstring.
+            state.last_usage_prompt_tokens = resp.usage.prompt_tokens
+            state.last_usage_completion_tokens = resp.usage.completion_tokens
             # Separate chain-of-thought from the answer. The reasoning is ephemeral:
             # only the clean answer is stored in the transcript / fed back to the model.
             thinking, answer = split_reasoning(resp.text)
@@ -99,7 +162,11 @@ class Agent:
             if not resp.tool_calls:
                 break
 
+            cancelled_mid_tools = False
             for call in resp.tool_calls:
+                if cancel is not None and cancel():
+                    cancelled_mid_tools = True
+                    break
                 result = self.tools.dispatch(call.name, call.arguments, ctx)
                 tool_log.append(
                     {"name": call.name, "args": call.arguments, "ok": result.ok, "error": result.error}
@@ -112,6 +179,9 @@ class Agent:
                     )
                 )
             state.last_tool_results = tool_log
+            if cancelled_mid_tools:
+                final_text = final_text or "[cancelled by user]"
+                break
         else:
             final_text = final_text or "[agent] step budget exhausted without a final answer."
 

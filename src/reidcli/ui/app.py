@@ -30,21 +30,26 @@ from collections.abc import Callable
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.formatted_text.utils import split_lines
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, VSplit, Window
+from prompt_toolkit.layout.containers import ConditionalContainer
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
-from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.text import Text
 
+from reidcli.deepreid import format_markdown, run_deepreid, save_deepreid_result
 from reidcli.diagnostics.logger import get_logger
 from reidcli.runtime.orchestrator import Orchestrator
 from reidcli.ui import render
+from reidcli.ui.commands import _EFFORT_LEVELS, SLASH_COMMANDS, WORKFLOW_SUBCOMMANDS
 from reidcli.ui.commands import handle as handle_command
 from reidcli.ui.render import _GERUNDS, _STAR_FRAMES, _bullet_grid
 from reidcli.ui.theme import (
@@ -64,8 +69,22 @@ from reidcli.ui.theme import (
 
 log = get_logger("reidcli.ui")
 
-# prompt_toolkit style classes for the box-drawing chrome (borders/caret).
-_STYLE = Style.from_dict({"box": "#ff5f5f", "caret": "#ff5f5f bold"})
+# A paste collapses to a placeholder when it's multi-line (a single-line
+# input box can't display embedded newlines sanely) or long enough to make
+# the box unreadable. Same idea as Claude Code's own input box.
+_PASTE_COLLAPSE_CHARS = 300
+
+# Typing one of these at the very start of the box turns it green and routes
+# the submission through the real Researcher->Planner->Critic DeepReid
+# pipeline (deepreid/pipeline.py) instead of a normal turn — the trigger word
+# itself is stripped before the task is handed to the pipeline.
+_DEEPREID_TRIGGERS = ("deepread", "deep read", "deepreid", "deep reid")
+
+# Box border/caret color. Normal is a flat color; DeepReid cycles through
+# these shades over time (see _box_color/_deepread_pulse_active) for an
+# actual pulse, not just a static color swap.
+_BOX_COLOR_NORMAL = "#ff5f5f"
+_DEEPREID_PULSE_SHADES = ("#5fd75f", "#7fe77f", "#9ff09f", "#7fe77f")
 
 _MODE_COLOR = {
     "strict": "#ff5555",
@@ -233,6 +252,39 @@ class _ScrollableOutputControl(FormattedTextControl):
         return super().mouse_handler(mouse_event)
 
 
+class SlashCommandCompleter(Completer):
+    """Completion menu for the input box: typing "/" lists every command
+    from `ui.commands.SLASH_COMMANDS` (the same source `/help` renders from,
+    so the two can't drift apart); typing "/workflow " lists its
+    subcommands from `WORKFLOW_SUBCOMMANDS`. Returns nothing for anything
+    else, so it's invisible while typing a normal prompt.
+    """
+
+    def get_completions(self, document, complete_event):  # type: ignore[no-untyped-def]
+        text = document.text_before_cursor
+        if not text.startswith("/"):
+            return
+
+        if text.startswith("/workflow "):
+            prefix = text[len("/workflow ") :]
+            if " " in prefix:
+                return
+            for name, args, desc in WORKFLOW_SUBCOMMANDS:
+                if name.startswith(prefix):
+                    display = f"{name} {args}".rstrip()
+                    yield Completion(name, start_position=-len(prefix), display=display, display_meta=desc)
+            return
+
+        word = text[1:]
+        if " " in word:
+            return
+        for cmd, args, desc, _group in SLASH_COMMANDS:
+            token = cmd[1:]
+            if token.startswith(word):
+                display = f"{cmd} {args}".rstrip()
+                yield Completion(f"/{token}", start_position=-len(text), display=display, display_meta=desc)
+
+
 class ChatApp:
     """Owns the full-screen layout, input handling, and turn dispatch."""
 
@@ -242,19 +294,24 @@ class ChatApp:
         self.output = _OutputPane()
         self._history = InMemoryHistory()
         self._thinking = {"flag": False, "start": 0.0, "gerund": "", "last_swap": 0.0}
+        self._cancel_event: threading.Event | None = None
         self._approving: dict = {"flag": False, "prompt": "", "result": False, "event": None}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._initial_prompt = (initial_prompt or "").strip()
+        self._pastes: dict[str, str] = {}
+        self._paste_counter = 0
+        self._deepreid_running = False
 
         self._buf = Buffer(
             history=self._history,
             multiline=False,
             read_only=Condition(lambda: self._approving["flag"]),
+            completer=SlashCommandCompleter(),
+            complete_while_typing=True,
         )
         self.app: Application = Application(
             layout=self._build_layout(),
             key_bindings=self._build_key_bindings(),
-            style=_STYLE,
             full_screen=True,
             mouse_support=True,
         )
@@ -280,8 +337,81 @@ class ChatApp:
     async def _spinner_ticker(self) -> None:
         while True:
             await asyncio.sleep(0.125)
-            if self._thinking["flag"] or self._approving["flag"]:
+            # Prune finished subagent rows past their linger window so the panel
+            # actually shrinks when children complete.
+            try:
+                self.orchestrator.subagents.prune_finished()
+            except AttributeError:
+                pass
+            if (
+                self._thinking["flag"]
+                or self._approving["flag"]
+                or self._deepread_pulse_active()
+                or self._subagent_rows_visible()
+            ):
                 self.app.invalidate()
+
+    # --- subagent panel --------------------------------------------------
+
+    _SUBAGENT_PANEL_MAX = 5
+
+    def _subagent_rows_visible(self) -> bool:
+        """True when there's anything to render in the panel (running or lingering)."""
+        try:
+            return bool(self.orchestrator.subagents.visible_rows())
+        except AttributeError:
+            return False
+
+    def _subagent_fragments(self):  # type: ignore[no-untyped-def]
+        try:
+            return self._build_subagent_fragments()
+        except Exception:  # noqa: BLE001 - cosmetic; never break the render loop
+            log.exception("subagent panel render failed")
+            return [("#9e9e9e", "  subagents: (render error)")]
+
+    def _build_subagent_fragments(self):  # type: ignore[no-untyped-def]
+        rows = self.orchestrator.subagents.visible_rows()
+        if not rows:
+            return [("", "")]
+        # Cap displayed rows; overflow gets a "+N more" line.
+        shown = rows[: self._SUBAGENT_PANEL_MAX]
+        overflow = len(rows) - len(shown)
+
+        status_glyph = {
+            "running": ("#ffd75f", "◐"),
+            "done": ("#5fd75f", "●"),
+            "error": ("#ff5f5f", "●"),
+        }
+        frags: list = []
+        for i, row in enumerate(shown):
+            color, glyph = status_glyph.get(row.status, ("#9e9e9e", "○"))
+            elapsed = int(row.elapsed_seconds)
+            name = row.name[:16].ljust(16)
+            status_text = row.status.ljust(7)
+            action = (row.error or row.last_action or "").strip()
+            action = action[:60]
+            frags += [
+                (color, f"  {glyph} "),
+                ("#ffffff bold", name),
+                (" "),
+                (f"{color}", status_text),
+                ("#9e9e9e", f" {elapsed}s"),
+            ]
+            if action:
+                frags += [("#6c6c6c", "  · "), ("#9e9e9e", action)]
+            if i != len(shown) - 1 or overflow > 0:
+                frags.append(("", "\n"))
+        if overflow > 0:
+            frags.append(("#9e9e9e", f"  … +{overflow} more subagent(s)"))
+        return frags
+
+    def _deepread_pulse_active(self) -> bool:
+        """Whether the box border should be pulsing right now — either the
+        trigger word is currently typed (not yet submitted) or the pipeline
+        is actively running. Without this, `_box_color()` would only ever be
+        re-evaluated on buffer-edit events, so it'd show one static shade
+        instead of animating while just sitting there."""
+        return bool(self._deepread_prefix_len()) or self._deepreid_running
 
     # --- rendering bridge --------------------------------------------------
 
@@ -291,16 +421,16 @@ class ChatApp:
         if self.app.is_running:
             self.app.invalidate()
 
-    def _render_thinking_variants(self, text: str, seconds: int) -> tuple[str, str] | None:
+    def _render_thinking_variants(self, text: str, seconds: int) -> tuple[str, str]:
         """Render both display variants of the chain-of-thought block once.
 
-        Collapsed: a single grayed-out "Thought for Ns" header, matching the
-        spinner's elapsed-time readout. Expanded: the same header plus the
-        full thinking text beneath it. Neither variant is ever re-rendered —
-        Ctrl+O just picks which was already captured.
+        Only called when the model actually produced reasoning (see
+        `_emit_turn_result`) — an empty turn no longer renders a filler
+        block. Collapsed: a single grayed-out "Thought for Ns" header
+        matching the spinner's elapsed-time readout. Expanded: the same
+        header plus the full thinking text beneath it. Neither variant is
+        ever re-rendered — Ctrl+O just picks which was already captured.
         """
-        if not text or not text.strip():
-            return None
         header = Text(f"  {SPARKLE} Thought for {seconds}s", style=DIM)
 
         render.console.print(header)
@@ -338,8 +468,15 @@ class ChatApp:
         return collapsed, expanded
 
     def _emit_turn_result(self, result: dict, thinking_seconds: int) -> None:
-        thinking_variants = self._render_thinking_variants(result.get("thinking") or "", thinking_seconds)
-        if thinking_variants is not None:
+        # Only render the thinking block when the model actually produced
+        # reasoning. Empty <think> content gets suppressed entirely rather
+        # than leaving a "(model returned no reasoning for this turn)" line
+        # floating above the answer, which was noisy and confusing when the
+        # provider skipped CoT (short answers, safety refusals, low-effort
+        # runs).
+        thinking_text = (result.get("thinking") or "").strip()
+        if thinking_text:
+            thinking_variants = self._render_thinking_variants(thinking_text, thinking_seconds)
             self.output.append_collapsible(*thinking_variants)
 
         for entry in result.get("tools", []):
@@ -367,6 +504,14 @@ class ChatApp:
         st = self.orchestrator.state
         if st is None:
             return 0
+        # Prefer real usage from the provider's last response over a guess —
+        # StubProvider (and any provider that doesn't report usage) leaves
+        # these at 0, so the char-based estimate below is still the fallback
+        # for it, but real providers (e.g. Anthropic) report actual token
+        # counts and that's what's shown once at least one turn has run.
+        real = st.last_usage_prompt_tokens + st.last_usage_completion_tokens
+        if real > 0:
+            return real
         try:
             chars = sum(len(m.content or "") for m in list(st.messages))
         except (RuntimeError, AttributeError):
@@ -439,6 +584,8 @@ class ChatApp:
             return [("#ffd75f bold", f"  {prompt_text}  allow? [y/N]")]
         if not self._thinking["flag"]:
             return [("", "")]
+        if self._cancel_event is not None and self._cancel_event.is_set():
+            return [("#ffd75f bold", "  ◐ stopping… "), ("#9e9e9e", "(esc pressed, finishing current step)")]
         now = time.monotonic()
         if now - self._thinking["last_swap"] > 8.0:
             self._thinking["gerund"] = random.choice(_GERUNDS)
@@ -468,11 +615,14 @@ class ChatApp:
         )
         spinner_window = Window(content=FormattedTextControl(self._spinner_fragments), height=1)
 
+        # Box border/caret color is a callable, not a static style, so it
+        # re-evaluates every render — that's what makes it turn green live as
+        # soon as the buffer starts with a DeepReid trigger word.
         def corner(ch: str) -> Window:
-            return Window(FormattedTextControl([("class:box", ch)]), width=1, height=1)
+            return Window(FormattedTextControl(lambda: [(self._box_color(), ch)]), width=1, height=1)
 
         def hline() -> Window:
-            return Window(char="─", style="class:box", height=1)
+            return Window(char="─", style=self._box_color, height=1)
 
         input_window = Window(BufferControl(buffer=self._buf), wrap_lines=False, height=1)
 
@@ -481,10 +631,10 @@ class ChatApp:
                 VSplit([corner("╭"), hline(), corner("╮")], height=1),
                 VSplit(
                     [
-                        Window(FormattedTextControl([("class:box", "│")]), width=1, height=1),
-                        Window(FormattedTextControl([("class:caret", " › ")]), width=3, height=1),
+                        Window(FormattedTextControl(lambda: [(self._box_color(), "│")]), width=1, height=1),
+                        Window(FormattedTextControl(lambda: [(f"{self._box_color()} bold", " › ")]), width=3, height=1),
                         input_window,
-                        Window(FormattedTextControl([("class:box", "│")]), width=1, height=1),
+                        Window(FormattedTextControl(lambda: [(self._box_color(), "│")]), width=1, height=1),
                     ],
                     height=1,
                 ),
@@ -493,8 +643,24 @@ class ChatApp:
         )
         status_window = Window(content=FormattedTextControl(self._status_fragments), height=1)
 
-        root = HSplit([output_window, spinner_window, box, status_window])
-        return Layout(root, focused_element=input_window)
+        # Subagent panel: appears directly under the input box (pushing it up
+        # visually because HSplit re-layouts) whenever there are running or
+        # recently-finished subagents. Sits above the status line so the
+        # footer's app/mode/model/tokens readout stays the last row.
+        subagent_panel = ConditionalContainer(
+            content=Window(content=FormattedTextControl(self._subagent_fragments)),
+            filter=Condition(self._subagent_rows_visible),
+        )
+
+        root = HSplit([output_window, spinner_window, box, subagent_panel, status_window])
+        # Floats above the cursor position of the focused control (the input
+        # buffer) — this is what makes the "/" completion menu pop up right
+        # above/below the box as you type, instead of requiring /help.
+        floated = FloatContainer(
+            content=root,
+            floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=10, scroll_offset=1))],
+        )
+        return Layout(floated, focused_element=input_window)
 
     # --- input handling --------------------------------------------------
 
@@ -502,9 +668,26 @@ class ChatApp:
         kb = KeyBindings()
         is_thinking = Condition(lambda: self._thinking["flag"])
         is_approving = Condition(lambda: self._approving["flag"])
+        # Left/Right only take over effort-cycling when the box is empty, so
+        # they still move the cursor to fix a typo once you're typing —
+        # unlike Up/Down (history), which are unconditional since a
+        # single-line buffer has no other use for them.
+        is_buffer_empty = Condition(lambda: not self._buf.text)
 
         @kb.add("enter", filter=~is_thinking & ~is_approving)
         async def _submit(event) -> None:  # type: ignore[no-untyped-def]
+            buf = event.current_buffer
+            if buf.complete_state is not None:
+                # A completion menu is open — Enter accepts the highlighted
+                # entry (or just closes the menu if nothing's highlighted
+                # yet), matching every other tool's "/" menu. It does not
+                # submit; that needs a second Enter once the text is filled in.
+                completion = buf.complete_state.current_completion
+                if completion is not None:
+                    buf.apply_completion(completion)
+                else:
+                    buf.cancel_completion()
+                return
             await self._on_submit()
 
         @kb.add("y", filter=is_approving)
@@ -517,6 +700,14 @@ class ChatApp:
         @kb.add("enter", filter=is_approving)
         def _approve_no(event) -> None:  # type: ignore[no-untyped-def]
             self._resolve_approval(False)
+
+        @kb.add("escape", filter=is_thinking)
+        def _cancel_turn(event) -> None:  # type: ignore[no-untyped-def]
+            # Stops the in-flight response, not the session — the running turn
+            # ends at its next safe point (see Agent.run_turn's `cancel` polling)
+            # instead of the whole app exiting, matching Claude Code's Escape.
+            if self._cancel_event is not None:
+                self._cancel_event.set()
 
         @kb.add("c-c")
         def _clear_line(event) -> None:  # type: ignore[no-untyped-def]
@@ -532,14 +723,131 @@ class ChatApp:
             self.output.toggle_expanded()
             self.app.invalidate()
 
+        @kb.add(Keys.BracketedPaste, filter=~is_approving)
+        def _paste(event) -> None:  # type: ignore[no-untyped-def]
+            data = event.data
+            if "\n" in data or len(data) > _PASTE_COLLAPSE_CHARS:
+                event.current_buffer.insert_text(self._collapse_paste(data))
+            else:
+                event.current_buffer.insert_text(data)
+
+        @kb.add("left", filter=is_buffer_empty & ~is_thinking & ~is_approving)
+        def _effort_prev(event) -> None:  # type: ignore[no-untyped-def]
+            self._cycle_effort(-1)
+
+        @kb.add("right", filter=is_buffer_empty & ~is_thinking & ~is_approving)
+        def _effort_next(event) -> None:  # type: ignore[no-untyped-def]
+            self._cycle_effort(1)
+
         return kb
+
+    def _cycle_effort(self, delta: int) -> None:
+        if self.orchestrator.state is None:
+            return
+        session = self.orchestrator.state.session
+        try:
+            idx = _EFFORT_LEVELS.index(session.reasoning_effort)
+        except ValueError:
+            idx = 0
+        session.reasoning_effort = _EFFORT_LEVELS[(idx + delta) % len(_EFFORT_LEVELS)]
+        self.orchestrator.session_store.update(session)
+        self.app.invalidate()
+
+    def _deepread_prefix_len(self) -> int:
+        """Length of a DeepReid trigger word at the start of the buffer, or 0
+        if there isn't one — 0 also means "not triggered", so this doubles as
+        the truthiness check. Requires a word boundary right after the
+        trigger (end-of-text or whitespace) so "deepreading..." doesn't
+        false-positive on "deepread"."""
+        text = self._buf.text.lstrip()
+        lead = len(self._buf.text) - len(text)
+        lowered = text.lower()
+        for trigger in _DEEPREID_TRIGGERS:
+            if lowered.startswith(trigger):
+                rest = text[len(trigger) :]
+                if not rest or rest[0].isspace():
+                    return lead + len(trigger)
+        return 0
+
+    def _box_color(self) -> str:
+        # Faster pulse while the pipeline is actually working, gentler pulse
+        # while just sitting there with the trigger typed but not submitted.
+        if self._deepreid_running:
+            idx = int(time.monotonic() * 6) % len(_DEEPREID_PULSE_SHADES)
+            return _DEEPREID_PULSE_SHADES[idx]
+        if self._deepread_prefix_len():
+            idx = int(time.monotonic() * 2) % len(_DEEPREID_PULSE_SHADES)
+            return _DEEPREID_PULSE_SHADES[idx]
+        return _BOX_COLOR_NORMAL
+
+    def _collapse_paste(self, data: str) -> str:
+        """Store a large/multi-line paste and return a short placeholder for
+        the input box — same idea as Claude Code's own `[Pasted text]`
+        collapse. The full text is substituted back in at submit time."""
+        self._paste_counter += 1
+        lines = data.count("\n") + 1
+        label = f"[Pasted text #{self._paste_counter} +{lines} lines]" if lines > 1 else f"[Pasted text #{self._paste_counter} +{len(data)} chars]"
+        self._pastes[label] = data
+        return label
+
+    def _expand_pastes(self, text: str) -> str:
+        for label, data in self._pastes.items():
+            text = text.replace(label, data)
+        return text
 
     async def _on_submit(self) -> None:
         text = self._buf.text
         if not text.strip():
             return
+        prefix_len = self._deepread_prefix_len()
         self._buf.reset()
+        if prefix_len:
+            task = self._expand_pastes(text[prefix_len:].lstrip())
+            self._pastes.clear()
+            await self._run_deepreid(task)
+            return
+        text = self._expand_pastes(text)
+        self._pastes.clear()
         await self._submit_text(text)
+
+    async def _run_deepreid(self, task: str) -> None:
+        """Run the real Researcher->Planner->Critic pipeline (deepreid/pipeline.py)
+        and render its Markdown output, instead of a normal single-agent turn."""
+        if not task.strip():
+            return
+        self._append_output(lambda: render.console.print(Text(f"  DeepReid: {task}", style="bold #5fd75f")))
+        self._deepreid_running = True
+        self.app.invalidate()
+
+        assert self._loop is not None
+        loop = self._loop
+
+        def progress(stage: str) -> None:
+            loop.call_soon_threadsafe(lambda: self._append_output(lambda: render.print_info(f"  {stage}...")))
+
+        try:
+            result = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    run_deepreid,
+                    self.orchestrator.config,
+                    self.orchestrator.provider,
+                    self.orchestrator.state.session.workspace,
+                    task,
+                    on_progress=progress,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - the TUI must not die on runtime errors
+            log.exception("deepreid failed")
+            error_text = str(exc)
+            self._append_output(lambda: render.print_error(error_text))
+        else:
+            path = save_deepreid_result(self.orchestrator.config, result)
+            self._append_output(lambda: render.print_assistant(format_markdown(result)))
+            self._append_output(lambda: render.print_info(f"saved to {path}"))
+        finally:
+            self._deepreid_running = False
+            self.app.invalidate()
 
     async def _submit_text(self, text: str) -> None:
         """Run one turn for `text` — shared by the Enter key binding and by
@@ -551,6 +859,8 @@ class ChatApp:
             outcome = self._run_slash(text)
             if outcome == "exit":
                 self.app.exit(result=0)
+            elif outcome.startswith("workflow-run:"):
+                await self._run_workflow(outcome.split(":", 1)[1])
             return
 
         self._append_output(lambda: render.print_user(text))
@@ -560,11 +870,16 @@ class ChatApp:
         self._thinking["last_swap"] = self._thinking["start"]
         self.app.invalidate()
 
+        cancel_event = threading.Event()
+        self._cancel_event = cancel_event
         approver = self._make_approver()
         assert self._loop is not None
         try:
             result = await self._loop.run_in_executor(
-                None, functools.partial(self.orchestrator.submit_task, text, approver=approver)
+                None,
+                functools.partial(
+                    self.orchestrator.submit_task, text, approver=approver, cancel=cancel_event.is_set
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - the TUI must not die on runtime errors
             log.exception("turn failed")
@@ -575,6 +890,7 @@ class ChatApp:
             self._emit_turn_result(result, seconds)
         finally:
             self._thinking["flag"] = False
+            self._cancel_event = None
             self.app.invalidate()
 
     def _run_slash(self, text: str) -> str:
@@ -591,6 +907,20 @@ class ChatApp:
 
         self._append_output(_do)
         return outcome
+
+    async def _run_workflow(self, name: str) -> None:
+        """Run a saved workflow's steps in sequence through `_submit_text`,
+        so each step gets identical treatment to typing it in directly —
+        slash commands and prompts both work, spinner/approval included."""
+        workflow = self.orchestrator.workflow_store.get(name)
+        if workflow is None:
+            self._append_output(lambda: render.print_error(f"no such workflow: {name}"))
+            return
+        self._append_output(
+            lambda: render.print_info(f"running workflow '{name}' ({len(workflow.steps)} steps)")
+        )
+        for step in workflow.steps:
+            await self._submit_text(step)
 
     # --- approval bridge (worker thread <-> main loop thread) --------------
 

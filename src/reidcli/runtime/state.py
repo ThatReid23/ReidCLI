@@ -20,6 +20,12 @@ class RuntimeState:
     turns: int = 0
     last_tool_results: list[dict] = field(default_factory=list)
     last_thinking: str | None = None  # chain-of-thought from the last turn (ephemeral)
+    # Usage from the most recent provider.chat() call (not summed across turns —
+    # each call's prompt_tokens already reflects the whole conversation resent
+    # so far, so summing would multiply-count it). 0 for providers that don't
+    # report usage (e.g. StubProvider); the UI falls back to a char estimate then.
+    last_usage_prompt_tokens: int = 0
+    last_usage_completion_tokens: int = 0
 
     @property
     def effective_mode(self):

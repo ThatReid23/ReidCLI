@@ -10,6 +10,7 @@ from reidcli.tools.file_tools import (
 )
 from reidcli.tools.registry import ToolRegistry
 from reidcli.tools.shell_tool import RunCommandTool, register_shell_tool
+from reidcli.tools.spawn_agent import SpawnAgentTool, register_spawn_agent
 from reidcli.tools.web_tools import WebSearchTool, register_web_tools
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "PatchFileTool",
     "ReadFileTool",
     "RunCommandTool",
+    "SpawnAgentTool",
     "ToolContext",
     "ToolDefinition",
     "ToolRegistry",
@@ -28,6 +30,7 @@ __all__ = [
     "WriteFileTool",
     "register_file_tools",
     "register_shell_tool",
+    "register_spawn_agent",
     "register_web_tools",
 ]
 
@@ -37,4 +40,5 @@ def default_registry() -> ToolRegistry:
     register_file_tools(reg)
     register_shell_tool(reg)
     register_web_tools(reg)
+    register_spawn_agent(reg)
     return reg
