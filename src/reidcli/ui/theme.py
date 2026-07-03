@@ -54,6 +54,7 @@ ROLE_STYLE = {
 
 # Status badge styles.
 STATUS_STYLE = {
+    "draft": DIM,
     "completed": SUCCESS,
     "active": WARN,
     "failed": DANGER,
@@ -61,6 +62,7 @@ STATUS_STYLE = {
     "pending": DIM,
     "skipped": DIM,
     "archived": DIM,
+    "abandoned": DIM,
 }
 
 # Risk colors.

@@ -8,7 +8,6 @@ from reidcli.policy.engine import PolicyEngine
 from reidcli.provider.registry import ProviderRegistry
 from reidcli.provider.store import ProviderRecord, ProviderStore, load_into
 from reidcli.provider.stub import StubProvider
-from reidcli.runtime.agent import Agent
 from reidcli.runtime.state import RuntimeState
 from reidcli.runtime.subagent import SubagentManager
 from reidcli.session.models import Session

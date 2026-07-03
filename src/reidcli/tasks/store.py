@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from reidcli.diagnostics.logger import get_logger
 from reidcli.tasks.models import Task, TaskStatus
@@ -36,9 +37,19 @@ class TaskStore:
         payload = {"tasks": [t.model_dump(mode="json") for t in tasks.values()]}
         self.path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
-    def create(self, title: str, depends_on: list[str] | None = None) -> Task:
+    def create(
+        self,
+        title: str,
+        depends_on: list[str] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> Task:
         tasks = self._read()
-        t = Task(session_id=self.session_id, title=title, depends_on=depends_on or [])
+        t = Task(
+            session_id=self.session_id,
+            title=title,
+            depends_on=depends_on or [],
+            meta=meta or {},
+        )
         tasks[t.id] = t
         self._write(tasks)
         log.debug("created task %s: %s", t.id, title)

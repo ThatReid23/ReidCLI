@@ -11,21 +11,14 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-# The Claude-Code-style glyphs (✻ ⏺ ⎿ › ·) are non-ASCII; a legacy Windows
-# codepage (cp1252) would raise UnicodeEncodeError mid-render. Force UTF-8 so
-# the branding survives regardless of the host console's default encoding.
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
-    except (AttributeError, ValueError):
-        pass
-
-from rich.console import Console
+from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.tree import Tree
 
+from reidcli.goals.models import Goal, GoalNode
 from reidcli.policy.engine import PolicyEngine
 from reidcli.policy.models import PermissionMode
 from reidcli.provider.base import Message
@@ -53,6 +46,15 @@ from reidcli.ui.theme import (
     fmt_tokens,
     short_path,
 )
+
+# The Claude-Code-style glyphs (✻ ⏺ ⎿ › ·) are non-ASCII; a legacy Windows
+# codepage (cp1252) would raise UnicodeEncodeError mid-render. Force UTF-8 so
+# the branding survives regardless of the host console's default encoding.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except (AttributeError, ValueError):
+        pass
 
 console = Console()
 
@@ -252,6 +254,125 @@ def print_tasks(tasks: list[Task]) -> None:
         parts.append(Text(f"{v} {k}", style=color))
     summary = Text("  ").join(parts)
     console.print(summary)
+
+
+def _status_text(value: str) -> Text:
+    color = STATUS_STYLE.get(value, "white")
+    return Text(value, style=f"bold {color}")
+
+
+def _goal_evidence_progress(goal: Goal) -> str:
+    total = len(goal.evidence)
+    done = sum(1 for evidence in goal.evidence if evidence.satisfied)
+    return f"{done}/{total}" if total else "-"
+
+
+def _goal_node_progress(goal: Goal) -> str:
+    total = len(goal.nodes)
+    done = sum(1 for node in goal.nodes if node.status.value == "completed")
+    return f"{done}/{total}" if total else "-"
+
+
+def print_goals(goals: list[Goal], active_goal_id: str | None = None) -> None:
+    if not goals:
+        console.print(Text("no goals", style=DIM))
+        return
+    table = Table(title="goals", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=MAX_WIDTH)
+    table.add_column("", width=2)
+    table.add_column("id", style=DIM, width=12)
+    table.add_column("status", width=12)
+    table.add_column("evidence", width=9)
+    table.add_column("nodes", width=7)
+    table.add_column("title")
+    for goal in goals:
+        marker = "●" if goal.id == active_goal_id else ""
+        table.add_row(
+            marker,
+            goal.id,
+            _status_text(goal.status.value),
+            _goal_evidence_progress(goal),
+            _goal_node_progress(goal),
+            goal.title,
+        )
+    console.print(table)
+    console.print(Text("  ● = active goal", style=DIM))
+
+
+def print_goal(goal: Goal) -> None:
+    evidence_done = sum(1 for evidence in goal.evidence if evidence.satisfied)
+    header = Text.assemble(
+        (goal.title, f"bold {PRIMARY}"),
+        ("  ", ""),
+        (goal.id, DIM),
+        ("  ", ""),
+        (goal.status.value, f"bold {STATUS_STYLE.get(goal.status.value, DIM)}"),
+    )
+    body = Table.grid(padding=(0, 1))
+    body.add_column(width=12, style=DIM)
+    body.add_column()
+    body.add_row("outcome", goal.outcome or "(none)")
+    body.add_row("evidence", f"{evidence_done}/{len(goal.evidence)} satisfied" if goal.evidence else "(none)")
+    body.add_row("nodes", f"{len(goal.nodes)}")
+    body.add_row("tasks", f"{len(goal.task_ids)} linked")
+    console.print(Panel(Group(header, body), box=BOX, border_style=PRIMARY, width=MAX_WIDTH))
+
+    if goal.evidence:
+        table = Table(title="evidence", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=MAX_WIDTH)
+        table.add_column("#", style=DIM, width=4)
+        table.add_column("done", width=6)
+        table.add_column("description")
+        table.add_column("note", style=DIM)
+        for index, evidence in enumerate(goal.evidence, 1):
+            table.add_row(
+                str(index),
+                "yes" if evidence.satisfied else "no",
+                evidence.description,
+                evidence.note or "",
+            )
+        console.print(table)
+
+    if goal.constraints:
+        table = Table(title="constraints", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=MAX_WIDTH)
+        table.add_column("kind", style=DIM, width=12)
+        table.add_column("description")
+        for constraint in goal.constraints:
+            table.add_row(constraint.kind, constraint.description)
+        console.print(table)
+
+    if goal.nodes:
+        print_goal_tree(goal)
+
+    if goal.revisions:
+        console.print(Text("revisions", style=f"bold {PRIMARY}"))
+        for revision in goal.revisions[-5:]:
+            console.print(Text.assemble(("  - ", DIM), (revision.note, "white")))
+
+
+def print_goal_tree(goal: Goal) -> None:
+    by_parent: dict[str | None, list[GoalNode]] = {}
+    for node in goal.nodes:
+        by_parent.setdefault(node.parent_id, []).append(node)
+
+    root = Tree(Text("nodes", style=f"bold {PRIMARY}"))
+
+    def add_nodes(parent_tree: Tree, parent_id: str | None) -> None:
+        for node in by_parent.get(parent_id, []):
+            deps = f" deps:{','.join(node.depends_on)}" if node.depends_on else ""
+            label = Text.assemble(
+                (node.id, DIM),
+                (" ", ""),
+                (node.kind.value, DIM),
+                (" ", ""),
+                (node.status.value, f"bold {STATUS_STYLE.get(node.status.value, DIM)}"),
+                ("  ", ""),
+                (node.title, "white"),
+                (deps, DIM),
+            )
+            branch = parent_tree.add(label)
+            add_nodes(branch, node.id)
+
+    add_nodes(root, None)
+    console.print(root)
 
 
 def print_sessions(sessions: list[Session]) -> None:

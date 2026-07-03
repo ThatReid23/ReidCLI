@@ -8,7 +8,6 @@ from reidcli.policy.engine import PolicyEngine
 from reidcli.policy.models import PermissionMode
 from reidcli.tools import default_registry
 from reidcli.tools.base import ToolContext
-from reidcli.tools.file_tools import ReadFileTool, WriteFileTool
 
 
 def _ctx(tmp_path: Path, approver=None) -> ToolContext:  # type: ignore[no-untyped-def]

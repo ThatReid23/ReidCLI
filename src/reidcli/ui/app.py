@@ -49,7 +49,12 @@ from reidcli.deepreid import format_markdown, run_deepreid, save_deepreid_result
 from reidcli.diagnostics.logger import get_logger
 from reidcli.runtime.orchestrator import Orchestrator
 from reidcli.ui import render
-from reidcli.ui.commands import _EFFORT_LEVELS, SLASH_COMMANDS, WORKFLOW_SUBCOMMANDS
+from reidcli.ui.commands import (
+    _EFFORT_LEVELS,
+    GOAL_SUBCOMMANDS,
+    SLASH_COMMANDS,
+    WORKFLOW_SUBCOMMANDS,
+)
 from reidcli.ui.commands import handle as handle_command
 from reidcli.ui.render import _GERUNDS, _STAR_FRAMES, _bullet_grid
 from reidcli.ui.theme import (
@@ -270,6 +275,16 @@ class SlashCommandCompleter(Completer):
             if " " in prefix:
                 return
             for name, args, desc in WORKFLOW_SUBCOMMANDS:
+                if name.startswith(prefix):
+                    display = f"{name} {args}".rstrip()
+                    yield Completion(name, start_position=-len(prefix), display=display, display_meta=desc)
+            return
+
+        if text.startswith("/goal "):
+            prefix = text[len("/goal ") :]
+            if " " in prefix:
+                return
+            for name, args, desc in GOAL_SUBCOMMANDS:
                 if name.startswith(prefix):
                     display = f"{name} {args}".rstrip()
                     yield Completion(name, start_position=-len(prefix), display=display, display_meta=desc)

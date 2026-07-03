@@ -16,6 +16,7 @@ from rich.console import Group
 from rich.panel import Panel
 from rich.text import Text
 
+from reidcli.goals.models import Goal, GoalNodeKind, GoalStatus
 from reidcli.policy.models import PermissionMode
 from reidcli.provider.store import SUPPORTED_KINDS, ProviderRecord, ProviderStore, build_provider
 from reidcli.runtime.orchestrator import Orchestrator
@@ -33,6 +34,7 @@ SLASH_COMMANDS: list[tuple[str, str, str, str]] = [
     ("/transcript", "[n]", "show last n messages (default 20)", "Session"),
     ("/rewind", "", "drop the last turn from state", "Session"),
     ("/tasks", "[status]", "list tasks (filter: pending|active|completed|failed|blocked)", "Tasks"),
+    ("/goal", "<new|list|show|active|outcome|evidence|add|milestone|done|block|revise|abandon|delete> ...", "manage session goals", "Goals"),
     ("/model", "<name>", "set model for the session", "Config & Policy"),
     ("/effort", "<level>", "set reasoning effort (low|medium|high|xhigh)", "Config & Policy"),
     ("/mode", "<mode>", "set permission mode (strict|balanced|autonomous|custom)", "Config & Policy"),
@@ -58,6 +60,22 @@ WORKFLOW_SUBCOMMANDS: list[tuple[str, str, str]] = [
     ("delete", "<name>", "delete a workflow"),
 ]
 
+GOAL_SUBCOMMANDS: list[tuple[str, str, str]] = [
+    ("new", "<title>", "create and activate a goal"),
+    ("list", "", "list goals in this session"),
+    ("show", "[id]", "show the active goal or a goal by id"),
+    ("active", "<id|clear>", "switch or clear the active goal"),
+    ("outcome", "<text>", "set the active goal outcome"),
+    ("evidence", "<add|done> ...", "manage active goal evidence"),
+    ("add", "<title>", "add a child subgoal to the active goal"),
+    ("milestone", "<title>", "add a milestone to the active goal"),
+    ("done", "[id] [note]", "mark a goal or node completed"),
+    ("block", "[id] <reason>", "mark a goal or node blocked"),
+    ("revise", "<note>", "record a revision on the active goal"),
+    ("abandon", "[id] <reason>", "abandon a goal or node"),
+    ("delete", "<id>", "delete a goal"),
+]
+
 
 def _build_help() -> Group:
     def section(header: str, body: str) -> Text:
@@ -81,6 +99,9 @@ def _build_help() -> Group:
 
     sub_lines = "\n".join(f"    /workflow {name:<8} {args:<14} {desc}" for name, args, desc in WORKFLOW_SUBCOMMANDS)
     parts.append(section("Workflow subcommands", sub_lines))
+
+    goal_lines = "\n".join(f"    /goal {name:<9} {args:<18} {desc}" for name, args, desc in GOAL_SUBCOMMANDS)
+    parts.append(section("Goal subcommands", goal_lines))
 
     parts.append(
         section(
@@ -177,6 +198,215 @@ def _handle_workflow(orchestrator: Orchestrator, arg: str) -> str | None:
         return None
 
     render.print_error(f"unknown /workflow subcommand: {sub} (try run|save|show|delete)")
+    return None
+
+
+def _goal_store(orchestrator: Orchestrator):
+    try:
+        return orchestrator.goal_store()
+    except RuntimeError:
+        render.print_error("no active session")
+        return None
+
+
+def _active_goal(store) -> Goal | None:  # type: ignore[no-untyped-def]
+    goal = store.active()
+    if goal is None:
+        render.print_error("no active goal (try /goal new <title>)")
+    return goal
+
+
+def _split_first(text: str) -> tuple[str, str]:
+    parts = text.strip().split(None, 1)
+    if not parts:
+        return "", ""
+    return parts[0], (parts[1] if len(parts) > 1 else "").strip()
+
+
+def _resolve_goal_target(store, text: str) -> tuple[Goal | None, str | None, str]:  # type: ignore[no-untyped-def]
+    """Resolve optional target syntax: goal id, active-goal node id, or active goal."""
+    token, rest = _split_first(text)
+    active = store.active()
+    if not token:
+        return active, None, ""
+
+    goals = {goal.id: goal for goal in store.list()}
+    if token in goals:
+        return goals[token], None, rest
+
+    if active is not None and any(node.id == token for node in active.nodes):
+        return active, token, rest
+
+    return active, None, text.strip()
+
+
+def _handle_goal_evidence(store, arg: str) -> None:  # type: ignore[no-untyped-def]
+    sub, rest = _split_first(arg)
+    goal = _active_goal(store)
+    if goal is None:
+        return
+    if sub == "add":
+        if not rest:
+            render.print_error("usage: /goal evidence add <text>")
+            return
+        store.add_evidence(goal.id, rest)
+        render.print_info("evidence added")
+        return
+    if sub == "done":
+        idx, note = _split_first(rest)
+        if not idx.isdigit():
+            render.print_error("usage: /goal evidence done <index> [note]")
+            return
+        updated = store.satisfy_evidence(goal.id, int(idx) - 1, note)
+        if updated is None:
+            render.print_error(f"no evidence item #{idx}")
+        else:
+            render.print_info(f"evidence #{idx} satisfied")
+        return
+    render.print_error("usage: /goal evidence <add|done> ...")
+
+
+def _handle_goal(orchestrator: Orchestrator, arg: str) -> str | None:
+    store = _goal_store(orchestrator)
+    if store is None:
+        return None
+    sub, rest = _split_first(arg)
+    sub = sub or "show"
+
+    if sub == "new":
+        if not rest:
+            render.print_error("usage: /goal new <title>")
+            return None
+        goal = store.create(rest)
+        render.print_info(f"created active goal {goal.id}")
+        render.print_goal(goal)
+        return None
+
+    if sub == "list":
+        render.print_goals(store.list(), store.active_id())
+        return None
+
+    if sub == "show":
+        goal = store.get(rest) if rest else store.active()
+        if goal is None:
+            render.print_error(f"no such goal: {rest or '(active)'}")
+        else:
+            render.print_goal(goal)
+        return None
+
+    if sub == "active":
+        if not rest:
+            goal = store.active()
+            render.print_info(f"active goal: {goal.id} {goal.title}" if goal else "no active goal")
+            return None
+        if rest == "clear":
+            store.set_active(None)
+            render.print_info("active goal cleared")
+            return None
+        goal = store.set_active(rest)
+        if goal is None:
+            render.print_error(f"no such goal: {rest}")
+        else:
+            render.print_info(f"active goal -> {goal.id} {goal.title}")
+        return None
+
+    if sub == "outcome":
+        goal = _active_goal(store)
+        if goal is None:
+            return None
+        if not rest:
+            render.print_error("usage: /goal outcome <text>")
+            return None
+        store.set_outcome(goal.id, rest)
+        render.print_info("outcome updated")
+        return None
+
+    if sub == "evidence":
+        _handle_goal_evidence(store, rest)
+        return None
+
+    if sub in ("add", "milestone"):
+        goal = _active_goal(store)
+        if goal is None:
+            return None
+        if not rest:
+            render.print_error(f"usage: /goal {sub} <title>")
+            return None
+        kind = GoalNodeKind.MILESTONE if sub == "milestone" else GoalNodeKind.SUBGOAL
+        node = store.add_node(goal.id, rest, kind)
+        if node is None:
+            render.print_error("failed to add goal node")
+        else:
+            render.print_info(f"added {kind.value} {node.id}")
+        return None
+
+    if sub == "done":
+        goal, node_id, note = _resolve_goal_target(store, rest)
+        if goal is None:
+            render.print_error("no active goal")
+            return None
+        if node_id:
+            store.update_status(goal.id, GoalStatus.COMPLETED, note or "completed", node_id=node_id)
+            render.print_info(f"completed node {node_id}")
+            return None
+        if not goal.evidence:
+            render.print_error("cannot complete a goal with no evidence (add /goal evidence add <text>)")
+            return None
+        if any(not evidence.satisfied for evidence in goal.evidence):
+            render.print_warn("goal has unsatisfied evidence; marking completed anyway")
+        store.update_status(goal.id, GoalStatus.COMPLETED, note or "completed")
+        render.print_info(f"completed goal {goal.id}")
+        return None
+
+    if sub == "block":
+        goal, node_id, reason = _resolve_goal_target(store, rest)
+        if goal is None:
+            render.print_error("no active goal")
+            return None
+        if not reason:
+            render.print_error("usage: /goal block [id] <reason>")
+            return None
+        store.update_status(goal.id, GoalStatus.BLOCKED, reason, node_id=node_id)
+        render.print_info(f"blocked {'node ' + node_id if node_id else 'goal ' + goal.id}")
+        return None
+
+    if sub == "revise":
+        goal = _active_goal(store)
+        if goal is None:
+            return None
+        if not rest:
+            render.print_error("usage: /goal revise <note>")
+            return None
+        store.add_note(goal.id, rest)
+        render.print_info("revision recorded")
+        return None
+
+    if sub == "abandon":
+        goal, node_id, reason = _resolve_goal_target(store, rest)
+        if goal is None:
+            render.print_error("no active goal")
+            return None
+        if not reason:
+            render.print_error("usage: /goal abandon [id] <reason>")
+            return None
+        store.update_status(goal.id, GoalStatus.ABANDONED, reason, node_id=node_id)
+        render.print_info(f"abandoned {'node ' + node_id if node_id else 'goal ' + goal.id}")
+        return None
+
+    if sub == "delete":
+        if not rest:
+            render.print_error("usage: /goal delete <id>")
+        elif store.delete(rest):
+            render.print_info(f"deleted goal {rest}")
+        else:
+            render.print_error(f"no such goal: {rest}")
+        return None
+
+    # Natural fallback: `/goal make me a report` should create a goal, not
+    # force the user to remember `/goal new ...`.
+    goal = store.create(arg.strip())
+    render.print_info(f"created active goal {goal.id}")
+    render.print_goal(goal)
     return None
 
 
@@ -306,6 +536,8 @@ def handle(orchestrator: Orchestrator, line: str) -> str:
         if arg:
             tasks = [t for t in tasks if t.status.value == arg]
         render.print_tasks(tasks)
+    elif cmd == "goal":
+        _handle_goal(orchestrator, arg)
     elif cmd == "transcript":
         if orchestrator.state is None:
             render.print_info("no active session")

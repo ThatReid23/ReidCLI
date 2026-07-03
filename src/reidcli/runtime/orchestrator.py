@@ -11,6 +11,7 @@ from pathlib import Path
 
 from reidcli.config.models import Config
 from reidcli.diagnostics.logger import get_logger
+from reidcli.goals import Goal, GoalStore
 from reidcli.nyx import NYX_SYSTEM_PROMPT
 from reidcli.policy.engine import PolicyEngine
 from reidcli.provider.base import BaseProvider
@@ -113,6 +114,11 @@ class Orchestrator:
             raise RuntimeError("no active session")
         return TaskStore(self.config.storage_root or (Path.home() / ".reidcli"), self.state.session.id)
 
+    def goal_store(self) -> GoalStore:
+        if self.state is None:
+            raise RuntimeError("no active session")
+        return GoalStore(self.config.storage_root or (Path.home() / ".reidcli"), self.state.session.id)
+
     def submit_task(
         self,
         user_input: str,
@@ -131,7 +137,22 @@ class Orchestrator:
         if self.state is None:
             raise RuntimeError("no active session; call start_session first")
         store = self.task_store()
-        task = store.create(title or user_input[:60])
+        active_goal = self.goal_store().active()
+        task_meta = {}
+        if active_goal is not None:
+            task_meta = {
+                "goal_id": active_goal.id,
+                "goal_title": active_goal.title,
+            }
+            if active_goal.active_node_id:
+                task_meta["goal_node_id"] = active_goal.active_node_id
+        task = store.create(title or user_input[:60], meta=task_meta)
+        if active_goal is not None:
+            self.goal_store().add_task_link(
+                active_goal.id,
+                task.id,
+                node_id=active_goal.active_node_id,
+            )
         store.update_status(task.id, TaskStatus.ACTIVE)
         self.state.active_task_id = task.id
 
@@ -174,6 +195,11 @@ class Orchestrator:
         if self.state is None:
             return []
         return self.task_store().list()
+
+    def list_goals(self) -> list[Goal]:
+        if self.state is None:
+            return []
+        return self.goal_store().list()
 
     def set_nyx(self, enabled: bool) -> None:
         """Toggle Nyx (redteam/offensive-security) persona. Rebuilds the Agent

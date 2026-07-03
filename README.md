@@ -51,7 +51,7 @@ reidcli doctor
 Expected output:
 
 ```
-reidcli 0.1.0
+reidcli 2.0.0
 settings  <path> (found|missing)
 python    <path> (3.13.x)
 workspace <cwd>
@@ -181,6 +181,60 @@ descriptions — the table below is the same information, grouped.
 | Command | Purpose |
 |---|---|
 | `/tasks [status]` | List tasks; filter by `pending` `active` `completed` `failed` `blocked` `skipped` |
+
+**Goals**
+
+| Command | Purpose |
+|---|---|
+| `/goal` / `/goal show [id]` | Show the active goal, or a goal by id |
+| `/goal <title>` | Create and activate a goal from free text |
+| `/goal new <title>` | Create and activate a structured session goal |
+| `/goal outcome <text>` | Set the active goal's success outcome |
+| `/goal evidence add <text>` | Add observable success evidence |
+| `/goal evidence done <index> [note]` | Mark evidence satisfied |
+| `/goal add <title>` | Add a child subgoal |
+| `/goal milestone <title>` | Add a milestone |
+| `/goal list` | List session goals |
+| `/goal active <id\|clear>` | Switch or clear the active goal |
+| `/goal done [id] [note]` | Mark a goal or goal node completed |
+| `/goal block [id] <reason>` | Mark a goal or goal node blocked |
+| `/goal revise <note>` | Record a revision note |
+| `/goal abandon [id] <reason>` | Abandon a goal or goal node |
+| `/goal delete <id>` | Delete a goal |
+
+How `/goal` works:
+
+- A **goal** is the durable outcome you are trying to reach in the current
+  session. It is not the same thing as a task.
+- A **task** is still one agent turn in `tasks.json`; a **goal** lives in
+  `goals.json` and tracks the larger outcome behind those turns.
+- The **active goal** is the goal new tasks are linked to automatically. Use
+  `/goal active <id>` to switch it, or `/goal active clear` to stop linking
+  new tasks.
+- `outcome` is the success condition in plain language.
+- `evidence` is what would prove the goal is done. `/goal done` refuses to
+  complete a goal with no evidence, so the feature nudges you away from vague
+  activity tracking.
+- `add` creates child subgoals. `milestone` creates progress markers. `block`,
+  `revise`, and `abandon` keep the history honest when reality changes.
+- Free text is accepted as a shortcut for creating a new active goal, so
+  `/goal make me a report of Reidcli` is the same kind of action as
+  `/goal new make me a report of Reidcli`.
+
+Typical flow:
+
+```text
+/goal make me a report of Reidcli
+/goal outcome A useful report exists and cites the relevant code/docs
+/goal evidence add Report covers command surface, runtime, tools, and persistence
+/goal add Inspect README and docs
+/goal milestone Draft report outline
+/goal show
+```
+
+After that, normal prompts you send in the TUI become tasks linked to the
+active goal. Use `/tasks` to inspect execution history and `/goal show` to
+inspect the goal hierarchy, evidence, blockers, and revisions.
 
 **Config & Policy**
 
@@ -495,6 +549,7 @@ Each session gets a structured directory under `~/.reidcli/sessions/<id>/`:
   meta.json         # Session record (id, workspace, model, mode, status, timestamps)
   transcript.jsonl  # One Message per line (restorable into state on resume)
   tasks.json        # Task state for the session
+  goals.json        # Goal hierarchy, evidence, active goal, revisions
   events.jsonl      # Runtime action log (turn summaries, lifecycle events)
 ```
 
@@ -543,14 +598,14 @@ risky actions silently.
 pytest
 ```
 
-35 focused tests across policy, tools, session, reasoning, the agent loop,
-DeepReid, and providers/subagents.
+43 focused tests cover policy, tools, session/task/goal persistence, reasoning,
+the agent loop, DeepReid, and providers/subagents.
 
 ### Lint
 
 ```powershell
-ruff check src
-ruff check --fix src   # auto-fix
+ruff check src tests
+ruff check --fix src tests   # auto-fix
 ```
 
 ### Project structure
@@ -564,6 +619,7 @@ ReidCLI/
     diagnostics/ # logger + JSONL event log
     session/     # Session model + structured per-session store
     tasks/       # Task model + store (state machine)
+    goals/       # Goal model + per-session goal hierarchy/evidence store
     policy/      # PermissionMode, decisions, risk, PolicyEngine
     provider/    # BaseProvider + StubProvider + Anthropic/OpenAI/OpenAI-compatible/Ollama
                  # + ProviderRegistry + ProviderStore (persisted /connect records)
@@ -603,6 +659,8 @@ See the parent repo's design docs:
   via env vars or `/connect`)
 - Session create / list / resume with message history restoration
 - Task tracking with status state machine (pending → active → completed/failed/skipped)
+- Goals: `/goal` manages per-session outcome/evidence/subgoal/milestone state
+  in `goals.json`; active goals are linked into new task metadata
 - Policy engine with 4 modes, path confinement, command allowlist/denylist —
   the single safety boundary for every tool, including subagents and Nyx mode
 - 9 tools (file read/write/patch/list/find/grep + shell + free web search +
@@ -629,9 +687,9 @@ See the parent repo's design docs:
   config block), project-local with upward directory search
 - Prompt injection at launch: literal argument, `--file`, or piped stdin
 - Headless exec mode
-- Structured persistence (meta / transcript / tasks / events per session;
+- Structured persistence (meta / transcript / tasks / goals / events per session;
   global workflows, providers, and DeepReid runs)
-- 35 passing tests, ruff clean
+- Test suite passing, ruff clean
 
 ## What is stubbed (extension-ready)
 
