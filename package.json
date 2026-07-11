@@ -1,5 +1,5 @@
 {
-  "name": "reidx",
+  "name": "@agxnte/reidx",
   "version": "2.0.2",
   "description": "Terminal-native personal intelligence and coding CLI (agent-first runtime)",
   "bin": {
