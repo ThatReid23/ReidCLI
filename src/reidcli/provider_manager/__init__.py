@@ -18,8 +18,6 @@ from reidcli.provider_manager.palette import (
     BG,
     BG_ALT,
     BORDER,
-    MAX_CONTENT_LINES,
-    WIDTH,
     ProviderPalette,
 )
 
@@ -28,13 +26,11 @@ __all__ = [
     "BG",
     "BG_ALT",
     "BORDER",
-    "MAX_CONTENT_LINES",
     "ProviderDatabase",
     "ProviderDefinition",
     "ProviderPalette",
     "StoredKey",
     "StoredProvider",
-    "WIDTH",
     "all_providers",
     "by_id",
     "decrypt",

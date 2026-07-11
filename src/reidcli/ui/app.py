@@ -52,8 +52,6 @@ from reidcli.provider_manager import (
     ACCENT,
     BG,
     BORDER,
-    MAX_CONTENT_LINES,
-    WIDTH,
     ProviderDatabase,
     ProviderPalette,
 )
@@ -114,23 +112,23 @@ _MODE_COLOR = {
 # the red skin and renders black-on-grey descriptions). Classes map to the
 # fragments menus.py emits; output-pane/status fragments carry absolute colors
 # so this global style never touches them.
-_MENU_BG = "#1c1c1c"
-_MENU_BG_ALT = "#262626"
+_MENU_BG = "#1c1818"
+_MENU_BG_ALT = "#262220"
 _UI_STYLE = Style.from_dict(
     {
         "completion-menu": f"bg:{_MENU_BG} {PRIMARY}",
         "completion-menu.completion": f"bg:{_MENU_BG} #d0d0d0",
         "completion-menu.completion.current": f"bg:{PRIMARY} {_MENU_BG} bold",
-        "completion-menu.meta.completion": f"bg:{_MENU_BG_ALT} #8a8a8a",
+        "completion-menu.meta.completion": f"bg:{_MENU_BG_ALT} #8a7a7a",
         "completion-menu.meta.completion.current": f"bg:#d75f5f {_MENU_BG}",
         "scrollbar.background": f"bg:{_MENU_BG_ALT}",
         "scrollbar.button": f"bg:{PRIMARY}",
         "scrollbar.arrow": f"bg:{_MENU_BG} {PRIMARY}",
         "palette-border": f"{ACCENT}",
         "palette-bg": f"bg:{BG}",
-        "palette-header": f"bg:{BG} bold {ACCENT}",
+        "palette-header": f"bg:#1a1010 bold {ACCENT}",
         "palette-footer": f"bg:{BG} {DIM}",
-        "palette-search": f"bg:{BG} #c8c8c8",
+        "palette-search": f"bg:{BG} #d0d0d0",
         "palette-search-label": f"bg:{BG} {ACCENT}",
         "palette-sep": f"bg:{BG} {BORDER}",
         "dim-overlay": "bg:#080808",
@@ -507,20 +505,17 @@ class ChatApp:
     def _palette_border_top(self) -> list[tuple[str, str]]:
         if self._palette is None:
             return []
-        inner = WIDTH - 2
-        return [("class:palette-border", f"╭{'─' * inner}╮")]
+        return self._palette.border_top_fragments()
 
     def _palette_border_bottom(self) -> list[tuple[str, str]]:
         if self._palette is None:
             return []
-        inner = WIDTH - 2
-        return [("class:palette-border", f"╰{'─' * inner}╯")]
+        return self._palette.border_bottom_fragments()
 
     def _palette_sep(self) -> list[tuple[str, str]]:
         if self._palette is None:
             return []
-        inner = WIDTH - 2
-        return [("class:palette-sep", f"├{'─' * inner}┤")]
+        return self._palette.separator_fragments()
 
     async def main(self) -> int:
         self._loop = asyncio.get_running_loop()
@@ -878,22 +873,9 @@ class ChatApp:
     # --- palette overlay --------------------------------------------------
 
     def _build_palette_overlay(self):
-        from prompt_toolkit.layout.dimension import D as Dim
-
-        palette_box = self._build_palette_box()
-        return HSplit([
-            Window(height=Dim(), char=" ", style="class:dim-overlay"),
-            VSplit([
-                Window(width=Dim(), char=" ", style="class:dim-overlay"),
-                palette_box,
-                Window(width=Dim(), char=" ", style="class:dim-overlay"),
-            ]),
-            Window(height=Dim(), char=" ", style="class:dim-overlay"),
-        ])
+        return self._build_palette_box()
 
     def _build_palette_box(self):
-        from prompt_toolkit.layout.dimension import D as Dim
-
         p = self._palette
 
         is_search = Condition(lambda: p is not None and p.is_search_screen())
@@ -965,7 +947,7 @@ class ChatApp:
         )
         filler = ConditionalContainer(
             content=Window(
-                FormattedTextControl(lambda: [("class:palette-bg", f"│{' ' * (WIDTH - 2)}│")]),
+                FormattedTextControl(lambda: [("class:palette-bg", f"│{' ' * (p.inner_width())}│")]),
                 height=1,
                 style="class:palette-bg",
             ),
@@ -973,7 +955,6 @@ class ChatApp:
         )
         content = Window(
             FormattedTextControl(content_frags),
-            height=Dim(max=MAX_CONTENT_LINES, preferred=MAX_CONTENT_LINES),
             style="class:palette-bg",
         )
         footer = Window(

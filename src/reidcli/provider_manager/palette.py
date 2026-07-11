@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -20,23 +21,22 @@ from reidcli.provider_manager.database import ProviderDatabase, StoredKey, Store
 
 log = get_logger("reidcli.provider_manager.palette")
 
-WIDTH = 72
-INNER = WIDTH - 2
-SEL_BG = "#2a1414"
-SEL_FG = "#ff8787"
-SEL_ICON = "#ff5f5f"
-DIM = "#555555"
-ACCENT = "#ff5f5f"
-OK = "#5fd75f"
-WARN = "#ffd75f"
-ERR = "#ff5555"
-BORDER = "#2a2a2a"
-BORDER_SEL = "#ff5f5f"
-BG = "#161616"
-BG_ALT = "#1c1c1c"
-BG_ROW = "#1a1a1a"
-SCROLL_IND = "#333333"
-MAX_CONTENT_LINES = 14
+SEL_BG = "#2d1820"
+SEL_FG = "#ffaaaa"
+SEL_ICON = "#ff6b6b"
+DIM = "#6b5b5b"
+ACCENT = "#ff6b6b"
+OK = "#7ddb7d"
+WARN = "#ffdb6b"
+ERR = "#ff6b6b"
+BORDER = "#3d2a2a"
+BORDER_SEL = "#ff6b6b"
+BG = "#131313"
+BG_ALT = "#1c1818"
+BG_ROW = "#181616"
+SCROLL_IND = "#2a2a2a"
+HEADER_BG = "#1a1010"
+ITEM_FG = "#d0d0d0"
 
 
 @dataclass
@@ -107,6 +107,7 @@ class ProviderPalette:
         self._active = False
         self.screen = self.LIST
         self.selected_index = 0
+        self._scroll_offset = 0
         self.current_provider: StoredProvider | None = None
         self.current_def: ProviderDefinition | None = None
         self._message_text = ""
@@ -127,6 +128,26 @@ class ProviderPalette:
     def active(self) -> bool:
         return self._active
 
+    def term_cols(self) -> int:
+        try:
+            cols, _ = shutil.get_terminal_size(fallback=(80, 24))
+            return max(40, cols)
+        except Exception:
+            return 80
+
+    def term_rows(self) -> int:
+        try:
+            _, rows = shutil.get_terminal_size(fallback=(80, 24))
+            return max(10, rows)
+        except Exception:
+            return 24
+
+    def inner_width(self) -> int:
+        return self.term_cols() - 2
+
+    def max_content_lines(self) -> int:
+        return max(3, self.term_rows() - 8)
+
     def is_search_screen(self) -> bool:
         return self._active and self.screen == self.LIST
 
@@ -145,6 +166,7 @@ class ProviderPalette:
         self._active = True
         self.screen = self.LIST
         self.selected_index = 0
+        self._scroll_offset = 0
         self.search_buf.text = ""
         self.current_provider = None
         self.current_def = None
@@ -155,6 +177,7 @@ class ProviderPalette:
         self.screen = self.LIST
         self.search_buf.text = ""
         self.input_buf.text = ""
+        self._scroll_offset = 0
         self._invalidate()
 
     def _invalidate(self) -> None:
@@ -170,9 +193,11 @@ class ProviderPalette:
         elif self.screen in (self.KEYS, self.WIZARD):
             self.screen = self.LIST
             self.selected_index = 0
+            self._scroll_offset = 0
         elif self.screen == self.MANAGE:
             self.screen = self.LIST
             self.selected_index = 0
+            self._scroll_offset = 0
         elif self.screen in (self.KEY_LABEL, self.KEY_INPUT):
             self.screen = self.KEYS if self.current_provider and not self.current_provider.keys else self.MANAGE
             self.input_buf.text = ""
@@ -183,12 +208,15 @@ class ProviderPalette:
         elif self.screen in (self.RENAME_SEL, self.DELETE_SEL):
             self.screen = self.MANAGE
             self.selected_index = 0
+            self._scroll_offset = 0
         elif self.screen == self.CONFIRM:
             self.screen = self.MANAGE
             self.selected_index = 0
+            self._scroll_offset = 0
         elif self.screen == self.MESSAGE:
             self.screen = self._message_next
             self.selected_index = 0
+            self._scroll_offset = 0
         elif self.screen == self.WIZARD:
             if self.wizard_step_idx > 0:
                 self.wizard_step_idx -= 1
@@ -199,24 +227,39 @@ class ProviderPalette:
             else:
                 self.screen = self.LIST
                 self.selected_index = 0
+                self._scroll_offset = 0
                 self.wizard_data = {}
                 self.wizard_step_idx = 0
         self._invalidate()
 
     def _on_search_changed(self, _buf: Buffer | None = None) -> None:
         self.selected_index = 0
+        self._scroll_offset = 0
         self._invalidate()
+
+    def _adjust_scroll(self, item_count: int) -> None:
+        max_lines = self.max_content_lines()
+        if item_count <= max_lines:
+            self._scroll_offset = 0
+            return
+        if self.selected_index < self._scroll_offset:
+            self._scroll_offset = self.selected_index
+        elif self.selected_index >= self._scroll_offset + max_lines:
+            self._scroll_offset = self.selected_index - max_lines + 1
+        self._scroll_offset = max(0, min(self._scroll_offset, item_count - max_lines))
 
     def on_up(self) -> None:
         items = self._build_items()
         if items:
             self.selected_index = (self.selected_index - 1) % len(items)
+            self._adjust_scroll(len(items))
             self._invalidate()
 
     def on_down(self) -> None:
         items = self._build_items()
         if items:
             self.selected_index = (self.selected_index + 1) % len(items)
+            self._adjust_scroll(len(items))
             self._invalidate()
 
     def on_enter(self) -> None:
@@ -370,6 +413,7 @@ class ProviderPalette:
                 self.current_provider = sp
                 self.screen = self.KEYS
             self.selected_index = 0
+            self._scroll_offset = 0
             self._invalidate()
             return
         if item.kind == "stored":
@@ -377,6 +421,7 @@ class ProviderPalette:
             self.current_def = None
             self.screen = self.MANAGE
             self.selected_index = 0
+            self._scroll_offset = 0
             self._invalidate()
 
     def _on_keys_select(self, item: PaletteItem) -> None:
@@ -399,6 +444,7 @@ class ProviderPalette:
         if label == "Switch Key":
             self.screen = self.KEYS
             self.selected_index = 0
+            self._scroll_offset = 0
             self._invalidate()
         elif label == "Add Key":
             self.screen = self.KEY_LABEL
@@ -409,10 +455,12 @@ class ProviderPalette:
         elif label == "Rename Key":
             self.screen = self.RENAME_SEL
             self.selected_index = 0
+            self._scroll_offset = 0
             self._invalidate()
         elif label == "Delete Key":
             self.screen = self.DELETE_SEL
             self.selected_index = 0
+            self._scroll_offset = 0
             self._invalidate()
         elif label == "Edit Provider":
             self._start_wizard(edit=True)
@@ -422,6 +470,7 @@ class ProviderPalette:
             self._pending_action = lambda: self._do_remove_provider()
             self.screen = self.CONFIRM
             self.selected_index = 0
+            self._scroll_offset = 0
             self._invalidate()
 
     def _on_rename_select(self, item: PaletteItem) -> None:
@@ -441,6 +490,7 @@ class ProviderPalette:
             self._pending_action = lambda: self._do_delete_key(k.id, k.label)
             self.screen = self.CONFIRM
             self.selected_index = 0
+            self._scroll_offset = 0
             self._invalidate()
 
     def _on_confirm_select(self, item: PaletteItem) -> None:
@@ -456,6 +506,7 @@ class ProviderPalette:
             self._pending_action = None
             self.screen = self.MANAGE
             self.selected_index = 0
+            self._scroll_offset = 0
             self._invalidate()
 
     def _on_wizard_select(self, item: PaletteItem) -> None:
@@ -520,6 +571,7 @@ class ProviderPalette:
             self.input_is_password = step.is_password
             self.input_prompt_text = step.prompt
         self.selected_index = 0
+        self._scroll_offset = 0
         self._invalidate()
 
     def _wizard_advance(self) -> None:
@@ -535,6 +587,7 @@ class ProviderPalette:
         else:
             self.input_buf.text = ""
         self.selected_index = 0
+        self._scroll_offset = 0
         self._invalidate()
 
     def _wizard_complete(self) -> None:
@@ -598,6 +651,7 @@ class ProviderPalette:
         self.current_provider = self.db.get_provider(name)
         self._register_current()
         self._show_message(f"Added key '{label}'", self.MANAGE)
+
     def _do_delete_key(self, key_id: str, label: str) -> str:
         if not self.current_provider:
             return "Error: no provider"
@@ -637,6 +691,18 @@ class ProviderPalette:
         self._message_next = next_screen
         self.screen = self.MESSAGE
         self._invalidate()
+
+    def border_top_fragments(self) -> list[tuple[str, str]]:
+        inner = self.inner_width()
+        return [("class:palette-border", f"╭{'─' * inner}╮")]
+
+    def border_bottom_fragments(self) -> list[tuple[str, str]]:
+        inner = self.inner_width()
+        return [("class:palette-border", f"╰{'─' * inner}╯")]
+
+    def separator_fragments(self) -> list[tuple[str, str]]:
+        inner = self.inner_width()
+        return [("class:palette-sep", f"├{'─' * inner}┤")]
 
     def header_fragments(self) -> list[tuple[str, str]]:
         if self.screen == self.LIST:
@@ -685,18 +751,23 @@ class ProviderPalette:
         items = self._build_items()
         if not items:
             return [(DIM, "  (no items)")]
+        inner = self.inner_width()
+        max_lines = self.max_content_lines()
+        self._adjust_scroll(len(items))
+        visible_start = self._scroll_offset
+        visible_end = min(visible_start + max_lines, len(items))
         frags: list[tuple[str, str]] = []
-        for i, item in enumerate(items):
+        for i in range(visible_start, visible_end):
+            item = items[i]
             is_sel = i == self.selected_index
             row_bg = SEL_BG if is_sel else (BG_ALT if i % 2 else BG_ROW)
             label_part = f"  {item.icon}  {item.label}"
             desc = item.description
-            remaining = max(1, INNER - len(label_part) - 1)
+            remaining = max(1, inner - len(label_part) - 1)
             if len(desc) > remaining:
                 desc = desc[: remaining - 1] + "…"
             desc_part = f" {desc}" if desc else ""
-            line = (label_part + desc_part)
-            pad = max(0, INNER - len(line))
+            pad = max(0, inner - len(label_part) - len(desc_part))
             if is_sel:
                 frags.append((f"bg:{row_bg} {SEL_FG} bold", label_part))
                 if desc_part:
@@ -704,13 +775,18 @@ class ProviderPalette:
                 else:
                     frags.append((f"bg:{row_bg}", " " * pad))
             else:
-                frags.append((f"bg:{row_bg} #c8c8c8", label_part))
+                frags.append((f"bg:{row_bg} {ITEM_FG}", label_part))
                 if desc_part:
                     frags.append((f"bg:{row_bg} {DIM}", desc_part + " " * pad))
                 else:
                     frags.append((f"bg:{row_bg}", " " * pad))
-            if i != len(items) - 1:
+            if i != visible_end - 1:
                 frags.append((f"bg:{row_bg}", "\n"))
+        remaining_lines = max_lines - (visible_end - visible_start)
+        for _ in range(remaining_lines):
+            if frags:
+                frags.append((f"bg:{BG}", "\n"))
+            frags.append((f"bg:{BG}", " " * inner))
         return frags
 
     def footer_fragments(self) -> list[tuple[str, str]]:
@@ -749,7 +825,7 @@ class ProviderPalette:
         if self.is_input_screen():
             return 1
         items = self._build_items()
-        return max(1, min(len(items), MAX_CONTENT_LINES))
+        return max(1, min(len(items), self.max_content_lines()))
 
     def total_height(self) -> int:
         return self.content_height() + 6
