@@ -36,7 +36,7 @@ class OpenAIProvider(BaseProvider):
         self.default_model = default_model or self.DEFAULT_MODEL
 
     @classmethod
-    def from_env(cls) -> "OpenAIProvider | None":
+    def from_env(cls) -> OpenAIProvider | None:
         """Build from OPENAI_* env vars. Returns None if no API key is set, so
         it can be auto-registered under `openai` alongside anthropic."""
         key = os.environ.get("OPENAI_API_KEY", "").strip()

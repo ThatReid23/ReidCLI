@@ -48,6 +48,15 @@ from rich.text import Text
 
 from reidcli.deepreid import format_markdown, run_deepreid, save_deepreid_result
 from reidcli.diagnostics.logger import get_logger
+from reidcli.provider_manager import (
+    ACCENT,
+    BG,
+    BORDER,
+    MAX_CONTENT_LINES,
+    WIDTH,
+    ProviderDatabase,
+    ProviderPalette,
+)
 from reidcli.runtime.orchestrator import Orchestrator
 from reidcli.ui import render
 from reidcli.ui.commands import (
@@ -114,10 +123,17 @@ _UI_STYLE = Style.from_dict(
         "completion-menu.completion.current": f"bg:{PRIMARY} {_MENU_BG} bold",
         "completion-menu.meta.completion": f"bg:{_MENU_BG_ALT} #8a8a8a",
         "completion-menu.meta.completion.current": f"bg:#d75f5f {_MENU_BG}",
-        # Scrollbar shown when the command list overflows the menu height.
         "scrollbar.background": f"bg:{_MENU_BG_ALT}",
         "scrollbar.button": f"bg:{PRIMARY}",
         "scrollbar.arrow": f"bg:{_MENU_BG} {PRIMARY}",
+        "palette-border": f"{ACCENT}",
+        "palette-bg": f"bg:{BG}",
+        "palette-header": f"bg:{BG} bold {ACCENT}",
+        "palette-footer": f"bg:{BG} {DIM}",
+        "palette-search": f"bg:{BG} #c8c8c8",
+        "palette-search-label": f"bg:{BG} {ACCENT}",
+        "palette-sep": f"bg:{BG} {BORDER}",
+        "dim-overlay": "bg:#080808",
     }
 )
 
@@ -314,7 +330,7 @@ class _OutputWindow(Window):
     with no jump.
     """
 
-    def __init__(self, pane: "_OutputPane", **kwargs) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, pane: _OutputPane, **kwargs) -> None:  # type: ignore[no-untyped-def]
         super().__init__(**kwargs)
         self._pane = pane
 
@@ -421,6 +437,10 @@ class ChatApp:
             completer=SlashCommandCompleter(),
             complete_while_typing=True,
         )
+        self._palette: ProviderPalette | None = None
+        self._palette_search_control: BufferControl | None = None
+        self._palette_input_control: BufferControl | None = None
+        self._init_palette()
         self.app: Application = Application(
             layout=self._build_layout(),
             key_bindings=self._build_key_bindings(),
@@ -435,6 +455,72 @@ class ChatApp:
         if self.orchestrator.state is None:
             self.orchestrator.start_session(title="interactive")
         self._append_output(render.banner)
+
+    def _init_palette(self) -> None:
+        if self._palette is not None:
+            return
+        from pathlib import Path
+        storage_root = self.orchestrator.config.storage_root or (Path.home() / ".reidcli")
+        db = ProviderDatabase(Path(storage_root))
+        self._palette = ProviderPalette(
+            db=db,
+            orchestrator=self.orchestrator,
+            on_close=self._on_palette_close,
+            on_invalidate=lambda: self.app.invalidate() if self.app.is_running else None,
+        )
+        self._palette_search_control = BufferControl(
+            buffer=self._palette.search_buf,
+            input_processors=[],
+        )
+        self._palette_input_control = BufferControl(
+            buffer=self._palette.input_buf,
+            input_processors=[],
+        )
+
+    def _activate_palette(self) -> None:
+        self._init_palette()
+        assert self._palette is not None
+        self._palette.activate()
+        assert self._palette_search_control is not None
+        self.app.layout.focus(self._palette_search_control)
+        self.app.invalidate()
+
+    def _on_palette_close(self, message: str) -> None:
+        self.app.layout.focus(self._buf)
+        if message:
+            self._append_output(lambda: render.print_info(message))
+        else:
+            self._append_output(lambda: render.print_info("provider palette closed"))
+        self.app.invalidate()
+
+    def _sync_palette_focus(self) -> None:
+        if self._palette is None or not self._palette.active:
+            self.app.layout.focus(self._buf)
+            return
+        if self._palette.is_input_screen():
+            assert self._palette_input_control is not None
+            self.app.layout.focus(self._palette_input_control)
+        else:
+            assert self._palette_search_control is not None
+            self.app.layout.focus(self._palette_search_control)
+
+    def _palette_border_top(self) -> list[tuple[str, str]]:
+        if self._palette is None:
+            return []
+        inner = WIDTH - 2
+        return [("class:palette-border", f"╭{'─' * inner}╮")]
+
+    def _palette_border_bottom(self) -> list[tuple[str, str]]:
+        if self._palette is None:
+            return []
+        inner = WIDTH - 2
+        return [("class:palette-border", f"╰{'─' * inner}╯")]
+
+    def _palette_sep(self) -> list[tuple[str, str]]:
+        if self._palette is None:
+            return []
+        inner = WIDTH - 2
+        return [("class:palette-sep", f"├{'─' * inner}┤")]
 
     async def main(self) -> int:
         self._loop = asyncio.get_running_loop()
@@ -767,9 +853,6 @@ class ChatApp:
         )
 
         root = HSplit([output_window, spinner_window, box, subagent_panel, status_window])
-        # Floats above the cursor position of the focused control (the input
-        # buffer) — this is what makes the "/" completion menu pop up right
-        # above/below the box as you type, instead of requiring /help.
         floated = FloatContainer(
             content=root,
             floats=[
@@ -777,10 +860,145 @@ class ChatApp:
                     xcursor=True,
                     ycursor=True,
                     content=CompletionsMenu(max_height=10, scroll_offset=1, display_arrows=True),
-                )
+                ),
+                Float(
+                    left=0,
+                    top=0,
+                    width=None,
+                    height=None,
+                    content=ConditionalContainer(
+                        content=self._build_palette_overlay(),
+                        filter=Condition(lambda: self._palette is not None and self._palette.active),
+                    ),
+                ),
             ],
         )
         return Layout(floated, focused_element=input_window)
+
+    # --- palette overlay --------------------------------------------------
+
+    def _build_palette_overlay(self):
+        from prompt_toolkit.layout.dimension import D as Dim
+
+        palette_box = self._build_palette_box()
+        return HSplit([
+            Window(height=Dim(), char=" ", style="class:dim-overlay"),
+            VSplit([
+                Window(width=Dim(), char=" ", style="class:dim-overlay"),
+                palette_box,
+                Window(width=Dim(), char=" ", style="class:dim-overlay"),
+            ]),
+            Window(height=Dim(), char=" ", style="class:dim-overlay"),
+        ])
+
+    def _build_palette_box(self):
+        from prompt_toolkit.layout.dimension import D as Dim
+
+        p = self._palette
+
+        is_search = Condition(lambda: p is not None and p.is_search_screen())
+        is_input = Condition(lambda: p is not None and p.is_input_screen())
+
+        def header_frags():
+            return p.header_fragments() if p is not None else []
+
+        def content_frags():
+            return p.content_fragments() if p is not None else []
+
+        def footer_frags():
+            return p.footer_fragments() if p is not None else []
+
+        top_border = Window(
+            FormattedTextControl(self._palette_border_top),
+            height=1,
+            style="class:palette-border",
+        )
+        header = Window(
+            FormattedTextControl(header_frags),
+            height=1,
+            style="class:palette-header",
+        )
+        sep = Window(
+            FormattedTextControl(self._palette_sep),
+            height=1,
+            style="class:palette-sep",
+        )
+        search_line = ConditionalContainer(
+            content=VSplit([
+                Window(
+                    FormattedTextControl(lambda: [("class:palette-search-label", f"│{p.search_label()}")]),
+                    width=5,
+                    height=1,
+                ),
+                Window(
+                    self._palette_search_control,
+                    height=1,
+                    style="class:palette-search",
+                ),
+                Window(
+                    FormattedTextControl(lambda: [("class:palette-search", "│")]),
+                    width=1,
+                    height=1,
+                ),
+            ]),
+            filter=is_search,
+        )
+        input_line = ConditionalContainer(
+            content=VSplit([
+                Window(
+                    FormattedTextControl(lambda: [("class:palette-search-label", f"│{p.input_label()}")]),
+                    width=14,
+                    height=1,
+                ),
+                Window(
+                    self._palette_input_control,
+                    height=1,
+                    style="class:palette-search",
+                ),
+                Window(
+                    FormattedTextControl(lambda: [("class:palette-search", "│")]),
+                    width=1,
+                    height=1,
+                ),
+            ]),
+            filter=is_input,
+        )
+        filler = ConditionalContainer(
+            content=Window(
+                FormattedTextControl(lambda: [("class:palette-bg", f"│{' ' * (WIDTH - 2)}│")]),
+                height=1,
+                style="class:palette-bg",
+            ),
+            filter=~is_search & ~is_input,
+        )
+        content = Window(
+            FormattedTextControl(content_frags),
+            height=Dim(max=MAX_CONTENT_LINES, preferred=MAX_CONTENT_LINES),
+            style="class:palette-bg",
+        )
+        footer = Window(
+            FormattedTextControl(footer_frags),
+            height=1,
+            style="class:palette-footer",
+        )
+        bottom_border = Window(
+            FormattedTextControl(self._palette_border_bottom),
+            height=1,
+            style="class:palette-border",
+        )
+        return HSplit([
+            top_border,
+            header,
+            sep,
+            search_line,
+            input_line,
+            filler,
+            sep,
+            content,
+            sep,
+            footer,
+            bottom_border,
+        ])
 
     # --- input handling --------------------------------------------------
 
@@ -788,13 +1006,35 @@ class ChatApp:
         kb = KeyBindings()
         is_thinking = Condition(lambda: self._thinking["flag"])
         is_approving = Condition(lambda: self._approving["flag"])
-        # Left/Right only take over effort-cycling when the box is empty, so
-        # they still move the cursor to fix a typo once you're typing —
-        # unlike Up/Down (history), which are unconditional since a
-        # single-line buffer has no other use for them.
         is_buffer_empty = Condition(lambda: not self._buf.text)
+        is_palette = Condition(lambda: self._palette is not None and self._palette.active)
 
-        @kb.add("enter", filter=~is_thinking & ~is_approving)
+        @kb.add("up", filter=is_palette)
+        def _palette_up(event) -> None:  # type: ignore[no-untyped-def]
+            self._palette.on_up()
+            self._sync_palette_focus()
+
+        @kb.add("down", filter=is_palette)
+        def _palette_down(event) -> None:  # type: ignore[no-untyped-def]
+            self._palette.on_down()
+            self._sync_palette_focus()
+
+        @kb.add("enter", filter=is_palette)
+        def _palette_enter(event) -> None:  # type: ignore[no-untyped-def]
+            self._palette.on_enter()
+            self._sync_palette_focus()
+
+        @kb.add("escape", filter=is_palette)
+        def _palette_escape(event) -> None:  # type: ignore[no-untyped-def]
+            self._palette.on_escape()
+            self._sync_palette_focus()
+
+        @kb.add("c-c", filter=is_palette)
+        def _palette_cancel(event) -> None:  # type: ignore[no-untyped-def]
+            self._palette.deactivate()
+            self._sync_palette_focus()
+
+        @kb.add("enter", filter=~is_thinking & ~is_approving & ~is_palette)
         async def _submit(event) -> None:  # type: ignore[no-untyped-def]
             buf = event.current_buffer
             if buf.complete_state is not None:
@@ -821,7 +1061,7 @@ class ChatApp:
         def _approve_no(event) -> None:  # type: ignore[no-untyped-def]
             self._resolve_approval(False)
 
-        @kb.add("escape", filter=is_thinking)
+        @kb.add("escape", filter=is_thinking & ~is_palette)
         def _cancel_turn(event) -> None:  # type: ignore[no-untyped-def]
             # Stops the in-flight response, not the session — the running turn
             # ends at its next safe point (see Agent.run_turn's `cancel` polling)
@@ -829,16 +1069,16 @@ class ChatApp:
             if self._cancel_event is not None:
                 self._cancel_event.set()
 
-        @kb.add("c-c")
+        @kb.add("c-c", filter=~is_palette)
         def _clear_line(event) -> None:  # type: ignore[no-untyped-def]
             if self._buf.text:
                 self._buf.reset()
 
-        @kb.add("c-d")
+        @kb.add("c-d", filter=~is_palette)
         def _exit(event) -> None:  # type: ignore[no-untyped-def]
             self.app.exit(result=0)
 
-        @kb.add("c-o")
+        @kb.add("c-o", filter=~is_palette)
         def _toggle_collapse(event) -> None:  # type: ignore[no-untyped-def]
             self.output.toggle_expanded()
             self.app.invalidate()
@@ -846,27 +1086,27 @@ class ChatApp:
         # Keyboard scrollback for the transcript pane. A page is roughly the
         # output window's height; we don't have it here without the renderer,
         # so a fixed page of 15 lines keeps PageUp/PageDown predictable.
-        @kb.add("pageup", filter=~is_approving)
+        @kb.add("pageup", filter=~is_approving & ~is_palette)
         def _page_up(event) -> None:  # type: ignore[no-untyped-def]
             self.output.scroll_up(15)
             self.app.invalidate()
 
-        @kb.add("pagedown", filter=~is_approving)
+        @kb.add("pagedown", filter=~is_approving & ~is_palette)
         def _page_down(event) -> None:  # type: ignore[no-untyped-def]
             self.output.scroll_down(15)
             self.app.invalidate()
 
-        @kb.add("s-up", filter=~is_approving)
+        @kb.add("s-up", filter=~is_approving & ~is_palette)
         def _line_up(event) -> None:  # type: ignore[no-untyped-def]
             self.output.scroll_up(1)
             self.app.invalidate()
 
-        @kb.add("s-down", filter=~is_approving)
+        @kb.add("s-down", filter=~is_approving & ~is_palette)
         def _line_down(event) -> None:  # type: ignore[no-untyped-def]
             self.output.scroll_down(1)
             self.app.invalidate()
 
-        @kb.add(Keys.BracketedPaste, filter=~is_approving)
+        @kb.add(Keys.BracketedPaste, filter=~is_approving & ~is_palette)
         def _paste(event) -> None:  # type: ignore[no-untyped-def]
             data = event.data
             if "\n" in data or len(data) > _PASTE_COLLAPSE_CHARS:
@@ -874,11 +1114,11 @@ class ChatApp:
             else:
                 event.current_buffer.insert_text(data)
 
-        @kb.add("left", filter=is_buffer_empty & ~is_thinking & ~is_approving)
+        @kb.add("left", filter=is_buffer_empty & ~is_thinking & ~is_approving & ~is_palette)
         def _effort_prev(event) -> None:  # type: ignore[no-untyped-def]
             self._cycle_effort(-1)
 
-        @kb.add("right", filter=is_buffer_empty & ~is_thinking & ~is_approving)
+        @kb.add("right", filter=is_buffer_empty & ~is_thinking & ~is_approving & ~is_palette)
         def _effort_next(event) -> None:  # type: ignore[no-untyped-def]
             self._cycle_effort(1)
 
@@ -1002,6 +1242,8 @@ class ChatApp:
             outcome = self._run_slash(text)
             if outcome == "exit":
                 self.app.exit(result=0)
+            elif outcome == "connect":
+                self._activate_palette()
             elif outcome.startswith("workflow-run:"):
                 await self._run_workflow(outcome.split(":", 1)[1])
             return

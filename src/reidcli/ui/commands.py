@@ -70,7 +70,7 @@ SLASH_COMMANDS: list[tuple[str, str, str, str]] = [
     ("/workflows", "", "list saved workflows", "Workflows"),
     ("/workflow", "<run|save|show|delete> ...", "manage saved workflows", "Workflows"),
     ("/providers", "", "list registered providers (stub is always default)", "Providers"),
-    ("/connect", "<name> <kind> <base_url> [api_key] [model]", "add a provider (kind: anthropic|openai|openai-compatible|ollama)", "Providers"),
+    ("/connect", "", "open the interactive provider connection palette", "Providers"),
     ("/disconnect", "<name>", "remove a saved provider", "Providers"),
     ("/use", "<name>", "switch this session to a registered provider", "Providers"),
     ("/help", "", "show this help", "Meta"),
@@ -646,7 +646,10 @@ def handle(orchestrator: Orchestrator, line: str) -> str:
     elif cmd == "providers":
         _handle_providers(orchestrator)
     elif cmd == "connect":
-        _handle_connect(orchestrator, arg)
+        if arg.strip():
+            _handle_connect(orchestrator, arg)
+        else:
+            return "connect"
     elif cmd == "disconnect":
         _handle_disconnect(orchestrator, arg)
     elif cmd == "use":
