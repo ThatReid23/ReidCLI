@@ -127,7 +127,10 @@ class ProviderStore:
         return True
 
 
-def validate_provider(record: ProviderRecord) -> tuple[bool, str]:
+def validate_provider(
+    record: ProviderRecord,
+    skip_verify: bool = False,
+) -> tuple[bool, str]:
     try:
         provider = build_provider(record)
     except (ValueError, TypeError) as exc:
@@ -137,15 +140,22 @@ def validate_provider(record: ProviderRecord) -> tuple[bool, str]:
         return False, "API key required for this provider kind"
     if not record.api_key:
         return True, "no key required"
+    if skip_verify:
+        return True, "verification skipped"
     try:
         models = provider.fetch_models()
+    except RuntimeError as exc:
+        msg = str(exc)
+        if msg.startswith("HTTP 401") or msg.startswith("HTTP 403"):
+            return False, f"authentication failed ({msg})"
+        if msg.startswith("HTTP "):
+            return False, f"provider error: {msg}"
+        return False, f"{msg} (use --skip-verify to save anyway)"
     except Exception as exc:
-        return False, f"could not connect to provider: {exc}"
+        return False, f"unexpected error: {exc} (use --skip-verify to save anyway)"
     if models:
         return True, f"ok ({len(models)} models available)"
-    if record.kind == "ollama":
-        return True, "connected"
-    return False, "key rejected or no models returned"
+    return True, "connected (no models endpoint or empty list)"
 
 
 def load_into(registry: ProviderRegistry, storage_root: Path) -> list[str]:

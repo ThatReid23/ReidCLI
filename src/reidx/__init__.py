@@ -1,3 +1,3 @@
 ﻿"""ReidX: terminal-native agent-first CLI runtime."""
 
-__version__ = "2.0.5"
+__version__ = "2.0.6"

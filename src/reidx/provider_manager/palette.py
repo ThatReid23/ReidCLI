@@ -610,8 +610,14 @@ class ProviderPalette:
             )
             ok, msg = validate_provider(record)
             if not ok:
-                self._show_message(f"Key validation failed: {msg}", self.WIZARD)
-                self.wizard_step_idx = len(WIZARD_STEPS) - 1
+                self._confirm_text = f"Key validation failed: {msg}\nSave anyway?"
+                self._pending_action = lambda: self._commit_wizard_provider(
+                    name, kind, base_url, model, auth, api_key, forced_msg=msg,
+                )
+                self.screen = self.CONFIRM
+                self.selected_index = 0
+                self._scroll_offset = 0
+                self._invalidate()
                 return
             if not model:
                 try:
@@ -622,6 +628,18 @@ class ProviderPalette:
                 if models:
                     model = models[0]
 
+        self._commit_wizard_provider(name, kind, base_url, model, auth, api_key)
+
+    def _commit_wizard_provider(
+        self,
+        name: str,
+        kind: str,
+        base_url: str,
+        model: str,
+        auth: str,
+        api_key: str,
+        forced_msg: str = "",
+    ) -> str:
         existing = self.db.get_provider(name)
         if existing:
             existing.kind = kind
@@ -660,7 +678,9 @@ class ProviderPalette:
         self.wizard_data = {}
         self.wizard_step_idx = 0
         self.input_is_password = False
-        self._close(f"Saved provider '{name}' ({kind})")
+        note = " (unverified)" if forced_msg else ""
+        self._close(f"Saved provider '{name}' ({kind}){note}")
+        return f"Saved provider '{name}'"
 
     def _do_add_key(self, label: str, api_key: str) -> None:
         if not self.current_provider:
@@ -673,13 +693,25 @@ class ProviderPalette:
             auth_method=sp.auth_method,
         )
         ok, msg = validate_provider(record)
-        if not ok:
-            self._show_message(f"Key validation failed: {msg}", self.MANAGE)
+        if ok:
+            self._commit_key(label, api_key, msg)
             return
+        self._confirm_text = f"Key validation failed: {msg}\nSave anyway?"
+        self._pending_action = lambda: self._commit_key(label, api_key, "saved (unverified)")
+        self.screen = self.CONFIRM
+        self.selected_index = 0
+        self._scroll_offset = 0
+        self._invalidate()
+
+    def _commit_key(self, label: str, api_key: str, msg: str) -> str:
+        if not self.current_provider:
+            return "Error: no provider"
+        name = self.current_provider.name
         self.db.add_key(name, label, api_key)
         self.current_provider = self.db.get_provider(name)
         self._register_current()
         self._show_message(f"Added key '{label}' ({msg})", self.MANAGE)
+        return f"Added key '{label}'"
 
     def _do_delete_key(self, key_id: str, label: str) -> str:
         if not self.current_provider:

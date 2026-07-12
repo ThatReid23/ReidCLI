@@ -536,10 +536,17 @@ def _handle_providers(orchestrator: Orchestrator) -> None:
 
 
 def _handle_connect(orchestrator: Orchestrator, arg: str) -> None:
-    parts = arg.split()
+    skip_verify = False
+    tokens = arg.split()
+    parts: list[str] = []
+    for tok in tokens:
+        if tok in ("--skip-verify", "--skip", "--no-verify"):
+            skip_verify = True
+        else:
+            parts.append(tok)
     if len(parts) < 3:
         render.print_error(
-            "usage: /connect <name> <kind> <base_url> [api_key] [model]  "
+            "usage: /connect <name> <kind> <base_url> [api_key] [model] [--skip-verify]  "
             f"(kind: {'|'.join(SUPPORTED_KINDS)})"
         )
         return
@@ -554,7 +561,7 @@ def _handle_connect(orchestrator: Orchestrator, arg: str) -> None:
     model = parts[4] if len(parts) > 4 else ""
     record = ProviderRecord(name=name, kind=kind, base_url=base_url, api_key=api_key, default_model=model)
     if api_key:
-        ok, msg = validate_provider(record)
+        ok, msg = validate_provider(record, skip_verify=skip_verify)
         if not ok:
             render.print_error(f"key validation failed: {msg}")
             return
@@ -564,7 +571,7 @@ def _handle_connect(orchestrator: Orchestrator, arg: str) -> None:
     except ValueError as exc:
         render.print_error(f"failed to build provider: {exc}")
         return
-    if not model and api_key:
+    if not model and api_key and not skip_verify:
         try:
             models = provider.fetch_models()
         except Exception:
