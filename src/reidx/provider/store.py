@@ -186,8 +186,8 @@ def load_into(registry: ProviderRegistry, storage_root: Path) -> list[str]:
 
 
 def load_from_database(registry: ProviderRegistry, storage_root: Path) -> list[str]:
-    from reidx.provider_manager.database import ProviderDatabase
     from reidx.provider.models import denormalize_model_id, normalize_model_id
+    from reidx.provider_manager.database import ProviderDatabase
 
     added: list[str] = []
     db = ProviderDatabase(storage_root)

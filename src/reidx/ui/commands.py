@@ -81,6 +81,7 @@ SLASH_COMMANDS: list[tuple[str, str, str, str]] = [
     ("/connect", "", "open the interactive provider connection palette", "Providers"),
     ("/disconnect", "<name>", "remove a saved provider", "Providers"),
     ("/use", "<name>", "switch this session to a registered provider", "Providers"),
+    ("/models", "[provider]", "list available models from providers (optionally filter by provider)", "Providers"),
     ("/help", "", "show this help", "Meta"),
     ("/clear", "", "clear the screen", "Meta"),
     ("/exit", "", f"quit {APP_NAME}", "Meta"),
@@ -485,9 +486,9 @@ def _providers_store(orchestrator: Orchestrator) -> ProviderStore:
 
 
 def _save_to_database(orchestrator: Orchestrator, record: ProviderRecord) -> None:
+    from reidx.provider.models import denormalize_model_id, normalize_model_id
     from reidx.provider_manager import keychain
     from reidx.provider_manager.database import ProviderDatabase, StoredKey, StoredProvider
-    from reidx.provider.models import denormalize_model_id, normalize_model_id
 
     root = orchestrator.config.storage_root or storage_root()
     db = ProviderDatabase(root)
@@ -624,6 +625,42 @@ def _handle_disconnect(orchestrator: Orchestrator, arg: str) -> None:
         render.print_error(f"no saved provider named '{name}'")
 
 
+def _handle_models(orchestrator: Orchestrator, arg: str) -> None:
+    """Handle /models command - list available models from providers."""
+    provider_filter = arg.strip() or None
+
+    if orchestrator.providers is None:
+        render.print_error("no provider registry available")
+        return
+
+    provider_names = orchestrator.providers.names()
+    if not provider_names:
+        render.print_info("no providers registered")
+        return
+
+    if provider_filter:
+        if provider_filter not in provider_names:
+            render.print_error(f"provider '{provider_filter}' not registered (see /providers)")
+            return
+        provider_names = [provider_filter]
+
+    for name in provider_names:
+        provider = orchestrator.providers.get(name)
+        try:
+            models = provider.fetch_models()
+        except Exception as exc:
+            render.print_error(f"  {name}: failed to fetch models - {exc}")
+            continue
+
+        if not models:
+            render.print_info(f"  {name}: (no models returned)")
+            continue
+
+        render.print_info(f"  {name} ({len(models)} models):")
+        for model in models:
+            render.print_info(f"    {model}")
+
+
 def _handle_use(orchestrator: Orchestrator, arg: str) -> None:
     name = arg.strip()
     if not name:
@@ -738,6 +775,8 @@ def handle(orchestrator: Orchestrator, line: str) -> str:
         _handle_disconnect(orchestrator, arg)
     elif cmd == "use":
         _handle_use(orchestrator, arg)
+    elif cmd == "models":
+        _handle_models(orchestrator, arg)
     elif cmd == "clear":
         render.console.clear()
     elif cmd in ("exit", "quit", "q"):

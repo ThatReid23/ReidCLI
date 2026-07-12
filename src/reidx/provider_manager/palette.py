@@ -10,12 +10,8 @@ from prompt_toolkit.buffer import Buffer
 
 from reidx.diagnostics.logger import get_logger
 from reidx.provider.models import (
-    ModelCache,
-    NormalizedModel,
     denormalize_model_id,
-    fetch_provider_models,
     normalize_model_id,
-    validate_model_against_provider,
 )
 from reidx.provider.store import ProviderRecord, build_provider, validate_provider
 from reidx.provider_manager.catalog import (

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Optional
 
 from reidx.diagnostics.logger import get_logger
 
@@ -75,12 +74,12 @@ class NormalizedModel:
     provider: str
     model_id: str
     full_id: str
-    variant: Optional[str]
+    variant: str | None
     base_model: str
     is_valid: bool
 
 
-def normalize_model_id(raw: str, provider_name: Optional[str] = None) -> NormalizedModel:
+def normalize_model_id(raw: str, provider_name: str | None = None) -> NormalizedModel:
     original = raw.strip()
 
     # Remove UI display text like "[via openrouter]"
@@ -204,7 +203,7 @@ class ModelCache:
         self._cache: dict[str, tuple[list[str], float]] = {}
         self._ttl = 3600
 
-    def get(self, provider_name: str) -> Optional[list[str]]:
+    def get(self, provider_name: str) -> list[str] | None:
         import time
         if provider_name in self._cache:
             models, timestamp = self._cache[provider_name]
