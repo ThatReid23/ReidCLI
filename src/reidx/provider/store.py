@@ -139,8 +139,8 @@ def validate_provider(record: ProviderRecord) -> tuple[bool, str]:
         return True, "no key required"
     try:
         models = provider.fetch_models()
-    except Exception:
-        return False, "could not connect to provider"
+    except Exception as exc:
+        return False, f"could not connect to provider: {exc}"
     if models:
         return True, f"ok ({len(models)} models available)"
     if record.kind == "ollama":

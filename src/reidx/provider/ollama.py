@@ -109,11 +109,7 @@ class OllamaProvider(BaseProvider):
         )
 
     def fetch_models(self) -> list[str]:
-        try:
-            body = get_json(f"{self.base_url}/api/tags", {})
-        except RuntimeError:
-            log.debug("failed to fetch models from ollama")
-            return []
+        body = get_json(f"{self.base_url}/api/tags", {})
         models: list[str] = []
         for item in body.get("models", []):
             name = item.get("name", "")

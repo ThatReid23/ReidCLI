@@ -606,6 +606,7 @@ class ProviderPalette:
             record = ProviderRecord(
                 name=name, kind=kind, base_url=base_url,
                 api_key=api_key, default_model=model,
+                auth_method=auth,
             )
             ok, msg = validate_provider(record)
             if not ok:
@@ -669,6 +670,7 @@ class ProviderPalette:
         record = ProviderRecord(
             name=name, kind=sp.kind, base_url=sp.base_url,
             api_key=api_key, default_model=sp.default_model,
+            auth_method=sp.auth_method,
         )
         ok, msg = validate_provider(record)
         if not ok:

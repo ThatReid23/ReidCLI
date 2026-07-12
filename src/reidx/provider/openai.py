@@ -127,11 +127,7 @@ class OpenAIProvider(BaseProvider):
 
     def fetch_models(self) -> list[str]:
         url = f"{self.base_url}/v1/models"
-        try:
-            body = get_json(url, self._headers())
-        except RuntimeError:
-            log.debug("failed to fetch models from %s", url)
-            return []
+        body = get_json(url, self._headers())
         models: list[str] = []
         for item in body.get("data", []):
             mid = item.get("id", "")
