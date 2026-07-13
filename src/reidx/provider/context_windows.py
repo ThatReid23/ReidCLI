@@ -20,8 +20,11 @@ from typing import Any
 # Only used when the provider tells us nothing and the id has no size hint.
 DEFAULT_CONTEXT_WINDOW = 128_000
 
-# model_id (normalized) -> tokens discovered from APIs this process
+# model_id (normalized) -> tokens discovered this process
 _LIVE: dict[str, int] = {}
+# Keys whose live value came from a provider /models payload (not our table).
+# API wins over the known table; table seeds only fill gaps / refresh outdated seeds.
+_LIVE_FROM_API: set[str] = set()
 
 # Keys we recognize anywhere in a model object (top-level or nested).
 # Prefer longer / more specific names first in extract (order matters there).
@@ -120,6 +123,8 @@ _KNOWN_WINDOWS: list[tuple[str, int]] = [
     ("grok-2", 131_072),
     ("grok", 131_072),
     # DeepSeek
+    # DeepSeek V4 (OpenCode Go / API) — 128k is the common host limit; model
+    # can raise via set_context_window if a host exposes more.
     ("deepseek-v4-pro", 128_000),
     ("deepseek-v4-flash", 128_000),
     ("deepseek-v4", 128_000),
@@ -128,14 +133,37 @@ _KNOWN_WINDOWS: list[tuple[str, int]] = [
     ("deepseek-reasoner", 128_000),
     ("deepseek-r1", 128_000),
     ("deepseek", 128_000),
-    # Zhipu / GLM (incl. NVIDIA NIM z-ai/*)
-    ("glm-5.2", 202_752),
-    ("glm-5", 128_000),
+    # Zhipu / GLM (incl. NVIDIA NIM z-ai/* and OpenCode Go glm-*)
+    # GLM-5.2: solid 1M context (Z.ai docs). GLM-5.1 and earlier: ~200k.
+    ("glm-5.2", 1_000_000),
+    ("glm-5.1", 200_000),
+    ("glm-5", 200_000),
     ("glm-4.6", 200_000),
     ("glm-4.5", 128_000),
     ("glm-4", 128_000),
     ("glm-z1", 128_000),
     ("glm", 128_000),
+    # OpenCode Go / Moonshot Kimi
+    ("kimi-k2.7-code", 256_000),
+    ("kimi-k2.7", 256_000),
+    ("kimi-k2.6", 256_000),
+    ("kimi-k2", 256_000),
+    ("kimi", 128_000),
+    # OpenCode Go / Xiaomi MiMo
+    ("mimo-v2.5-pro", 256_000),
+    ("mimo-v2.5", 128_000),
+    ("mimo", 128_000),
+    # OpenCode Go / MiniMax (Anthropic Messages path)
+    ("minimax-m3", 200_000),
+    ("minimax-m2.7", 200_000),
+    ("minimax-m2.5", 200_000),
+    ("minimax", 200_000),
+    # OpenCode Go / Qwen
+    ("qwen3.7-max", 256_000),
+    ("qwen3.7-plus", 256_000),
+    ("qwen3.6-plus", 256_000),
+    ("qwen3.7", 256_000),
+    ("qwen3.6", 256_000),
     # Meta Llama (hosted / NIM)
     ("llama-4-maverick", 1_048_576),
     ("llama-4-scout", 10_000_000),
@@ -287,13 +315,30 @@ def known_context_for(model: str) -> int | None:
     return best[1] if best else None
 
 
-def remember_context(model: str, tokens: int) -> None:
+def _track_keys(model: str) -> list[str]:
+    key = normalize_model_id(model)
+    if not key:
+        return []
+    keys = [key]
+    if "/" in key:
+        keys.append(key.split("/", 1)[1])
+    return keys
+
+
+def remember_context(model: str, tokens: int, *, from_api: bool = False) -> None:
+    """Cache a context window. API values stick; table seeds won't overwrite them."""
     if not model or tokens < 1024:
         return
-    key = normalize_model_id(model)
-    _LIVE[key] = int(tokens)
-    if "/" in key:
-        _LIVE[key.split("/", 1)[1]] = int(tokens)
+    n = int(tokens)
+    for key in _track_keys(model):
+        if not from_api and key in _LIVE_FROM_API:
+            # Keep authoritative API metadata over our known-table seed.
+            continue
+        _LIVE[key] = n
+        if from_api:
+            _LIVE_FROM_API.add(key)
+        else:
+            _LIVE_FROM_API.discard(key)
 
 
 def ingest_models_payload(items: list[Any]) -> None:
@@ -307,36 +352,39 @@ def ingest_models_payload(items: list[Any]) -> None:
         mid_s = str(mid)
         n = extract_context_from_model_obj(item)
         if n:
-            remember_context(mid_s, n)
+            remember_context(mid_s, n, from_api=True)
         else:
             # Most OpenAI-compatible catalogs omit context — seed from table
             # so /model list shows real windows instead of default 128k.
             known = known_context_for(mid_s)
             if known:
-                remember_context(mid_s, known)
+                remember_context(mid_s, known, from_api=False)
 
 
 def clear_live_cache() -> None:
     _LIVE.clear()
+    _LIVE_FROM_API.clear()
 
 
-def _live_match(model: str) -> int | None:
+def _live_match(model: str) -> tuple[int, bool] | None:
+    """Return (tokens, from_api) for the best live cache hit, if any."""
     m = normalize_model_id(model)
     if not m:
         return None
     if m in _LIVE:
-        return _LIVE[m]
+        return _LIVE[m], m in _LIVE_FROM_API
     if "/" in m:
         bare = m.rsplit("/", 1)[-1]
         if bare in _LIVE:
-            return _LIVE[bare]
-    # Exact-ish: live key equals bare name of model or full id
-    best: tuple[int, int] | None = None
+            return _LIVE[bare], bare in _LIVE_FROM_API
+    best: tuple[int, int, bool] | None = None  # len, size, from_api
     for key, size in _LIVE.items():
         if key == m or m.endswith("/" + key) or key.endswith("/" + m.split("/")[-1]):
             if best is None or len(key) > best[0]:
-                best = (len(key), size)
-    return best[1] if best else None
+                best = (len(key), size, key in _LIVE_FROM_API)
+    if best is None:
+        return None
+    return best[1], best[2]
 
 
 def _hint_from_model_id(model: str) -> int | None:
@@ -363,11 +411,16 @@ def _hint_from_model_id(model: str) -> int | None:
 def context_window_for(model: str, *, session_window: int = 0) -> int:
     """Best-known window for `model`.
 
-    Priority: live API cache → known table → session → id size tags → default.
+    Priority:
+      1. Live value from provider `/models` (API)
+      2. Known model-id table (e.g. glm-5.2 → 1M)
+      3. Live value seeded from the table earlier
+      4. Session-stored window
+      5. Size tags in the id
+      6. DEFAULT_CONTEXT_WINDOW (128k)
 
-    `session_window` is optional; live/known beat a stale session value so the
-    footer updates after `/model list` fills the cache (many startups seed
-    session with the 128k default before any catalog is loaded).
+    Live/known beat a stale session value so the footer updates when you
+    `/model` switch — e.g. off an old 202k seed onto GLM-5.2's 1M.
     """
     if not (model or "").strip():
         if session_window and session_window >= 1024:
@@ -375,10 +428,20 @@ def context_window_for(model: str, *, session_window: int = 0) -> int:
         return DEFAULT_CONTEXT_WINDOW
 
     live = _live_match(model)
-    if live:
-        return live
-
     known = known_context_for(model)
+
+    if live is not None:
+        tokens, from_api = live
+        if from_api:
+            return tokens
+        # Table seed in live cache — prefer a better known entry if we have one
+        # (table was updated in a newer release).
+        if known and known != tokens:
+            return known
+        if known:
+            return known
+        return tokens
+
     if known:
         return known
 
@@ -390,6 +453,36 @@ def context_window_for(model: str, *, session_window: int = 0) -> int:
         return hint
 
     return DEFAULT_CONTEXT_WINDOW
+
+
+def bind_model_context(
+    model: str,
+    provider: Any | None = None,
+    *,
+    network: bool = False,
+    timeout: int = 5,
+) -> int:
+    """Resolve + cache context for `model`, and return the window size.
+
+    Call this whenever the active model changes (`/model`, `/use`, session
+    start). Instantly applies the known table; optionally asks the provider's
+    `/models` API (when it reports context fields).
+    """
+    mid = (model or "").strip()
+    if not mid:
+        return DEFAULT_CONTEXT_WINDOW
+
+    # Always re-seed from the known table so id switches (e.g. → glm-5.2)
+    # update the meter without waiting for a network round-trip.
+    known = known_context_for(mid)
+    if known:
+        remember_context(mid, known, from_api=False)
+
+    if network and provider is not None:
+        return refresh_context_from_provider(
+            provider, mid, timeout=timeout, network=True
+        )
+    return context_window_for(mid)
 
 
 def refresh_context_from_provider(
@@ -410,10 +503,11 @@ def refresh_context_from_provider(
     if not mid:
         return DEFAULT_CONTEXT_WINDOW
 
-    # Instant path: already cached.
-    hit = _live_match(mid)
-    if hit:
-        return hit
+    # Seed known table first so a missing API field still yields a real window.
+    known = known_context_for(mid)
+    if known:
+        remember_context(mid, known, from_api=False)
+
     if not network:
         return context_window_for(mid)
 
@@ -444,14 +538,10 @@ def refresh_context_from_provider(
                 if iid_n == mid_n or iid_n.endswith("/" + bare) or iid_n == bare:
                     n = extract_context_from_model_obj(item)
                     if n:
-                        remember_context(mid, n)
-                        remember_context(iid, n)
+                        remember_context(mid, n, from_api=True)
+                        remember_context(iid, n, from_api=True)
                         return n
-            # Matched id in catalog but no context field — known table / cache
-            got = context_window_for(mid)
-            if got and got != DEFAULT_CONTEXT_WINDOW:
-                remember_context(mid, got)
-            return got
+            return context_window_for(mid)
     except Exception:  # noqa: BLE001
         pass
 

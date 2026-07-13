@@ -1,19 +1,18 @@
 """Streaming: SSE parse, OpenAI chat_stream assembly, session stream modes."""
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
 from unittest.mock import patch
 
+from reidx.config.models import default_config
+from reidx.policy.engine import PolicyEngine
 from reidx.provider.base import Message, ProviderResponse
 from reidx.provider.openai import OpenAICompatibleProvider
+from reidx.provider.stub import StubProvider
 from reidx.runtime.agent import Agent
 from reidx.runtime.state import RuntimeState
 from reidx.session.models import Session
-from reidx.config.models import default_config
-from reidx.policy.engine import PolicyEngine
-from reidx.provider.stub import StubProvider
 from reidx.tools import default_registry
-from pathlib import Path
 
 
 def test_iter_sse_json_parses_data_lines() -> None:

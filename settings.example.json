@@ -6,7 +6,10 @@
     "ANTHROPIC_MODEL": "",
     "OPENAI_API_KEY": "",
     "OPENAI_BASE_URL": "",
-    "OPENAI_MODEL": ""
+    "OPENAI_MODEL": "",
+    "OPENCODE_API_KEY": "",
+    "OPENCODE_GO_API_KEY": "",
+    "OPENCODE_GO_MODEL": ""
   },
   "theme": "dark",
   "effortLevel": "medium",

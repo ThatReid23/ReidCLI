@@ -122,11 +122,39 @@ def default_registry(config: Config) -> ProviderRegistry:
         reg.register("anthropic", anthropic)
         log.debug("auto-registered anthropic provider from env vars")
 
-    from reidx.provider.openai import OpenAIProvider  # noqa: PLC0415
+    from reidx.provider.openai import OpenAICompatibleProvider, OpenAIProvider  # noqa: PLC0415
     openai = OpenAIProvider.from_env()
     if openai is not None:
         reg.register("openai", openai)
         log.debug("auto-registered openai provider from env vars")
+
+    # OpenCode Go (https://opencode.ai/go) — Zen subscription API key.
+    import os
+
+    go_key = (
+        os.environ.get("OPENCODE_GO_API_KEY", "").strip()
+        or os.environ.get("OPENCODE_API_KEY", "").strip()
+    )
+    if go_key:
+        go_model = (
+            os.environ.get("OPENCODE_GO_MODEL", "").strip()
+            or os.environ.get("OPENCODE_MODEL", "").strip()
+            or "glm-5.2"
+        )
+        go_base = (
+            os.environ.get("OPENCODE_GO_BASE_URL", "").strip()
+            or "https://opencode.ai/zen/go/v1"
+        )
+        reg.register(
+            "OpenCode Go",
+            OpenAICompatibleProvider(
+                api_key=go_key,
+                base_url=go_base,
+                default_model=go_model,
+            ),
+            aliases=["opencode-go", "opencode", "zen-go", "go"],
+        )
+        log.debug("auto-registered OpenCode Go provider from env vars")
 
     for name, pc in config.providers.items():
         if name == "stub" or name in reg.names():

@@ -8,8 +8,8 @@ from reidx.provider.context_windows import (
     extract_context_from_model_obj,
     ingest_models_payload,
     known_context_for,
-    remember_context,
     refresh_context_from_provider,
+    remember_context,
 )
 
 
@@ -73,8 +73,10 @@ def test_ingest_seeds_known_when_api_omits_context() -> None:
 
 def test_known_table_without_live_cache() -> None:
     clear_live_cache()
-    assert known_context_for("z-ai/glm-5.2") == 202_752
-    assert context_window_for("z-ai/glm-5.2") == 202_752
+    assert known_context_for("z-ai/glm-5.2") == 1_000_000
+    assert context_window_for("z-ai/glm-5.2") == 1_000_000
+    assert context_window_for("glm-5.2") == 1_000_000
+    assert context_window_for("glm-5.1") == 200_000
     assert context_window_for("claude-3-5-sonnet-latest") == 200_000
     assert context_window_for("gpt-4.1-mini") == 1_047_576
     assert context_window_for("o3-mini") == 200_000
@@ -93,6 +95,31 @@ def test_known_beats_stale_session_default() -> None:
     """Startup often stores 128k before any catalog — don't freeze wrong size."""
     clear_live_cache()
     assert context_window_for("claude-sonnet-4", session_window=128_000) == 200_000
+
+
+def test_known_beats_stale_seeded_live_cache() -> None:
+    """Old table seeds (202k) must not stick when known table is updated (1M)."""
+    from reidx.provider.context_windows import remember_context
+
+    clear_live_cache()
+    remember_context("glm-5.2", 202_752, from_api=False)  # outdated seed
+    assert context_window_for("glm-5.2") == 1_000_000
+
+
+def test_api_live_beats_known_table() -> None:
+    from reidx.provider.context_windows import remember_context
+
+    clear_live_cache()
+    remember_context("glm-5.2", 256_000, from_api=True)
+    assert context_window_for("glm-5.2") == 256_000
+
+
+def test_bind_model_context_updates_for_glm() -> None:
+    from reidx.provider.context_windows import bind_model_context
+
+    clear_live_cache()
+    n = bind_model_context("glm-5.2", provider=None, network=False)
+    assert n == 1_000_000
 
 
 def test_session_window_when_nothing_else() -> None:

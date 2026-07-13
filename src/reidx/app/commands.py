@@ -208,9 +208,7 @@ def doctor() -> None:
     """Run environment diagnostics."""
     cfg = ConfigLoader().load()
     orch = build_orchestrator(cfg)
-    from reidx.config.settings import settings_path
-
-    from reidx.config.settings import ensure_user_settings, global_settings_path
+    from reidx.config.settings import ensure_user_settings, settings_path
 
     sp = settings_path()
     user_sp = ensure_user_settings()

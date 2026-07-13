@@ -155,6 +155,52 @@ class PatchFileTool(BaseTool):
         return ToolResult.ok_("patched", path=str(path))
 
 
+def _entry_type_label(path: Path) -> str:
+    """Human type label for directory listings (Name / Type columns)."""
+    name = path.name
+    if path.is_dir():
+        if name in (".git",):
+            return "Git repo data"
+        if name in (".venv", "venv", "node_modules"):
+            return "Virtual env" if "venv" in name else "Dependencies"
+        if name.startswith(".") and name.endswith("cache"):
+            return "Cache"
+        if name in ("src", "tests", "docs", "bin", "scripts"):
+            return {
+                "src": "Source code",
+                "tests": "Test suite",
+                "docs": "Documentation",
+                "bin": "Binary/entry scripts",
+                "scripts": "Utility scripts",
+            }.get(name, "Directory")
+        return "Directory"
+    if name == "README.md":
+        return "README"
+    if name == "package.json":
+        return "npm package manifest"
+    if name == "pyproject.toml":
+        return "Python project config"
+    if name in (".gitignore", ".npmignore"):
+        return "Ignore rules"
+    if name == ".gitattributes":
+        return "Git attributes"
+    if name.startswith(".npm"):
+        return "npm config"
+    if name.endswith((".py", ".pyi")):
+        return "Python"
+    if name.endswith((".js", ".mjs", ".cjs", ".ts", ".tsx")):
+        return "JavaScript/TypeScript"
+    if name.endswith((".md", ".rst")):
+        return "Documentation"
+    if name.endswith((".json", ".toml", ".yaml", ".yml", ".ini")):
+        return "Config"
+    if name.endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")):
+        return "Image"
+    if name.endswith((".zip", ".tar", ".gz", ".whl")):
+        return "Archive"
+    return "File"
+
+
 class ListDirTool(BaseTool):
     @property
     def definition(self) -> ToolDefinition:
@@ -168,8 +214,22 @@ class ListDirTool(BaseTool):
             return blocked
         if not path.is_dir():
             return ToolResult.fail(f"not a directory: {path}")
-        entries = sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir())
-        return ToolResult.ok_("\n".join(entries), count=len(entries))
+        # Two-column Name / Type listing so the agent (and TUI) can render a
+        # clean full-width table instead of a bare name dump.
+        rows: list[tuple[str, str]] = []
+        try:
+            children = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except OSError as exc:
+            return ToolResult.fail(f"cannot list {path}: {exc}")
+        for p in children:
+            name = p.name + ("/" if p.is_dir() else "")
+            rows.append((name, _entry_type_label(p)))
+        # Plain text table — Markdown-friendly for the model, readable raw.
+        name_w = min(40, max((len(n) for n, _ in rows), default=4))
+        lines = [f"{'Name':<{name_w}}  Type", f"{'-' * name_w}  ----"]
+        for name, typ in rows:
+            lines.append(f"{name:<{name_w}}  {typ}")
+        return ToolResult.ok_("\n".join(lines), count=len(rows))
 
 
 class FindFilesTool(BaseTool):

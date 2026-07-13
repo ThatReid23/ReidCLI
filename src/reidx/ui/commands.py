@@ -871,9 +871,8 @@ def _handle_model(orchestrator: Orchestrator, arg: str) -> None:
         return
     name = arg.strip()
     from reidx.provider.context_windows import (
-        context_window_for,
+        bind_model_context,
         fmt_context_window,
-        refresh_context_from_provider,
     )
 
     # Bare /model or explicit list → show the catalog.
@@ -881,7 +880,7 @@ def _handle_model(orchestrator: Orchestrator, arg: str) -> None:
         _print_model_catalog(orchestrator)
         return
 
-    # Set model — do not download the catalog (that caused the hang).
+    # Set model — context window auto-updates from known table + provider /models.
     orchestrator.state.session.model = name
     provider_name = orchestrator.state.session.provider
     if getattr(orchestrator.provider, "default_model", None) is not None:
@@ -890,8 +889,10 @@ def _handle_model(orchestrator: Orchestrator, arg: str) -> None:
         orchestrator.config.providers[provider_name].default_model = name
     from reidx.config.settings import persist_default_model
 
-    window = refresh_context_from_provider(
-        orchestrator.provider, name, network=False
+    # Seeds known ids instantly (glm-5.2 → 1M); short API probe for hosts that
+    # return context_length on /models (won't hang long on OpenCode-style lists).
+    window = bind_model_context(
+        name, orchestrator.provider, network=True, timeout=4
     )
     orchestrator.state.session.context_window = window
     orchestrator.session_store.update(orchestrator.state.session)
@@ -984,17 +985,54 @@ def handle(orchestrator: Orchestrator, line: str) -> str:
         else:
             render.print_info("no active session")
     elif cmd == "sessions":
-        render.print_sessions(orchestrator.session_store.list())
+        sessions = orchestrator.session_store.list()
+        counts: dict[str, int] = {}
+        for s in sessions:
+            try:
+                counts[s.id] = len(orchestrator.session_store.read_messages(s.id))
+            except Exception:  # noqa: BLE001
+                counts[s.id] = 0
+        # Newest first so the list matches /resume completion order.
+        try:
+            sessions = sorted(sessions, key=lambda x: x.updated_at, reverse=True)
+        except Exception:  # noqa: BLE001
+            pass
+        render.print_sessions(sessions, message_counts=counts)
     elif cmd == "resume":
         if not arg:
             render.print_error("usage: /resume <session-id>")
+            render.print_info("type /resume  (with a space) for a session list, or /sessions")
         else:
             try:
-                orchestrator.resume_session(arg)
-                count = len(orchestrator.state.messages) if orchestrator.state else 0
-                render.print_info(f"resumed {arg} ({count} messages restored)")
+                session = orchestrator.resume_session(arg)
+                msgs = orchestrator.state.messages if orchestrator.state else []
+                # Skip pure system prompt when counting "conversation" for the user.
+                visible = [m for m in msgs if m.role != "system"]
+                count = len(msgs)
+                title = (session.title or "untitled").strip() or "untitled"
+                render.print_info(
+                    f"resumed {session.id}  ·  {title}  ·  "
+                    f"{session.provider}/{session.model or '?'}  ·  "
+                    f"{count} message(s) restored"
+                )
+                if not visible:
+                    render.print_warn(
+                        "this session has no saved chat turns yet "
+                        "(started but never completed a reply, or transcript was empty). "
+                        "Try another id from /sessions, or keep chatting here."
+                    )
+                else:
+                    # Re-show the conversation so resume is visible in the TUI,
+                    # not only loaded silently for the model context.
+                    render.print_info("— conversation —")
+                    render.print_transcript(msgs, n=min(40, max(len(visible), 12)))
+                    render.print_info(
+                        f"— end · {len(visible)} non-system turn(s) in context · "
+                        f"/transcript for more —"
+                    )
             except KeyError as exc:
                 render.print_error(str(exc))
+                render.print_info("use /sessions or /resume  (space) to pick an id")
     elif cmd == "tasks":
         tasks = orchestrator.list_tasks()
         if arg:

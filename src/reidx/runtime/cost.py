@@ -43,14 +43,35 @@ _PRICE_TABLE: list[tuple[str, float, float]] = [
     ("claude-3-sonnet", 3.00, 15.00),
     ("claude-3-haiku", 0.25, 1.25),
     ("claude", 3.00, 15.00),
-    # DeepSeek (often very cheap via API)
-    ("deepseek-v4-pro", 0.55, 2.19),
+    # DeepSeek (OpenCode Go list prices + public APIs)
+    ("deepseek-v4-pro", 1.74, 3.48),
     ("deepseek-v4-flash", 0.14, 0.28),
-    ("deepseek-v4", 0.55, 2.19),
+    ("deepseek-v4", 1.74, 3.48),
     ("deepseek-chat", 0.14, 0.28),
     ("deepseek-reasoner", 0.55, 2.19),
     ("deepseek-r1", 0.55, 2.19),
     ("deepseek", 0.14, 0.28),
+    # OpenCode Go / Zhipu GLM
+    ("glm-5.2", 1.40, 4.40),
+    ("glm-5.1", 1.40, 4.40),
+    ("glm-5", 1.40, 4.40),
+    # OpenCode Go / Kimi
+    ("kimi-k2.7-code", 0.95, 4.00),
+    ("kimi-k2.7", 0.95, 4.00),
+    ("kimi-k2.6", 0.95, 4.00),
+    ("kimi-k2", 0.95, 4.00),
+    # OpenCode Go / MiMo
+    ("mimo-v2.5-pro", 1.74, 3.48),
+    ("mimo-v2.5", 0.14, 0.28),
+    # OpenCode Go / MiniMax
+    ("minimax-m3", 0.30, 1.20),
+    ("minimax-m2.7", 0.30, 1.20),
+    ("minimax-m2.5", 0.30, 1.20),
+    ("minimax", 0.30, 1.20),
+    # OpenCode Go / Qwen
+    ("qwen3.7-max", 2.50, 7.50),
+    ("qwen3.7-plus", 0.40, 1.60),
+    ("qwen3.6-plus", 0.50, 3.00),
     # Google
     ("gemini-2.5-pro", 1.25, 10.00),
     ("gemini-2.5-flash", 0.15, 0.60),

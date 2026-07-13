@@ -200,7 +200,6 @@ def _set_system_clipboard(text: str) -> bool:
     if sys.platform == "win32":
         try:
             import ctypes
-            from ctypes import wintypes
 
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
@@ -354,17 +353,35 @@ class _ConsoleCapture:
     lands in a buffer we drain instead of stdout."""
 
     def __init__(self) -> None:
-        cols, _rows = shutil.get_terminal_size(fallback=(100, 30))
         self._buf = io.StringIO()
         self.console = Console(
             file=self._buf,
-            width=max(40, cols - 2),
+            width=self._measure_width(),
             force_terminal=True,
             color_system="truecolor",
             highlight=False,
             soft_wrap=False,
         )
         self._pos = 0
+
+    @staticmethod
+    def _measure_width() -> int:
+        # Track the live terminal so tables/markdown fill the pane (not a
+        # fixed 80-col column stuck in the middle of a wide Windows Terminal).
+        try:
+            from reidx.ui.theme import content_width
+
+            return content_width(margin=2)
+        except Exception:  # noqa: BLE001
+            cols, _ = shutil.get_terminal_size(fallback=(100, 30))
+            return max(40, cols - 2)
+
+    def sync_width(self) -> None:
+        """Refresh Rich width before a turn (resize-friendly)."""
+        try:
+            self.console.width = self._measure_width()
+        except Exception:  # noqa: BLE001
+            pass
 
     def drain(self) -> str:
         text = self._buf.getvalue()
@@ -691,13 +708,22 @@ class _OutputPane:
         # scroll directly from `bottom_line`, which gives continuous,
         # bottom-anchored scrolling that offset/cursor tricks can't (the
         # renderer refuses to leave blank space below the last line).
+        try:
+            return self._build_fragments()
+        except Exception:  # noqa: BLE001 - never crash the PT render loop
+            log.exception("output pane render failed")
+            return [("#ff5f5f", "  (output render error)")]
+
+    def _build_fragments(self):  # type: ignore[no-untyped-def]
+        # Snapshot live_stream once (worker thread may mutate it during stream).
+        live = self.live_stream or ""
         lines = list(split_lines(self._all_fragments()))
         # Live stream tokens (while the model is still generating).
-        if self.live_stream:
+        if live:
             stream_frags = [
                 ("", "\n"),
                 (f"{PRIMARY} bold", f"{BULLET} "),
-                ("#d0d0d0", self.live_stream),
+                ("#d0d0d0", live),
                 ("#9e9e9e", " ▍"),
             ]
             lines.extend(list(split_lines(stream_frags)))
@@ -708,12 +734,21 @@ class _OutputPane:
         out: list = []
         for i, line in enumerate(lines):
             if bounds is not None:
-                out.extend(_apply_selection_highlight(line, line_index=i, sel_a=bounds[0], sel_b=bounds[1]))
+                out.extend(
+                    _apply_selection_highlight(
+                        line, line_index=i, sel_a=bounds[0], sel_b=bounds[1]
+                    )
+                )
             else:
                 out.extend(line)
             if i != total - 1:
                 out.append(("", "\n"))
-        return out
+        # Guard: prompt_toolkit requires every fragment to be (style, text[, handler]).
+        return [
+            f
+            for f in out
+            if isinstance(f, tuple) and len(f) >= 2 and isinstance(f[1], str)
+        ]
 
 
 def finish_output_selection(  # type: ignore[no-untyped-def]
@@ -1093,6 +1128,14 @@ class SlashCommandCompleter(Completer):
                 )
             return
 
+        # /resume <id> — list known sessions (newest first)
+        if text.startswith("/resume "):
+            prefix = text[len("/resume ") :]
+            if " " in prefix:
+                return
+            yield from self._resume_completions(prefix)
+            return
+
         # Enum-valued commands: "/effort " -> low|medium|high|xhigh, etc. Offers
         # the choice list from ARG_CHOICES as soon as the command + space is
         # typed, so values don't have to be memorized.
@@ -1116,13 +1159,64 @@ class SlashCommandCompleter(Completer):
                 display = f"{cmd} {args}".rstrip()
                 yield Completion(f"/{token}", start_position=-len(text), display=display, display_meta=desc)
 
+    def _resume_completions(self, prefix: str):  # type: ignore[no-untyped-def]
+        """Yield session-id completions for `/resume `."""
+        orch = self.orchestrator
+        if orch is None:
+            return
+        try:
+            sessions = list(orch.session_store.list())
+        except Exception:  # noqa: BLE001 - completion must never crash the TUI
+            return
+        if not sessions:
+            # Hint so the menu isn't empty and silent.
+            yield Completion(
+                "",
+                start_position=-len(prefix),
+                display="(no sessions yet)",
+                display_meta="chat first, then /sessions",
+            )
+            return
+        # Newest updated first (most likely resume target).
+        try:
+            sessions.sort(key=lambda s: s.updated_at, reverse=True)
+        except Exception:  # noqa: BLE001
+            pass
+        current_id = ""
+        if orch.state is not None:
+            current_id = orch.state.session.id
+        needle = prefix.lower()
+        for sess in sessions:
+            sid = sess.id
+            if needle and needle not in sid.lower() and needle not in (sess.title or "").lower():
+                continue
+            title = (sess.title or "untitled").strip() or "untitled"
+            if len(title) > 36:
+                title = title[:33] + "…"
+            model = (sess.model or "").strip()
+            status = getattr(sess.status, "value", str(sess.status))
+            meta_bits = [title]
+            if model:
+                meta_bits.append(model)
+            if status and status != "active":
+                meta_bits.append(status)
+            if sid == current_id:
+                meta_bits.append("current")
+            display = sid
+            yield Completion(
+                sid,
+                start_position=-len(prefix),
+                display=display,
+                display_meta=" · ".join(meta_bits),
+            )
+
 
 def _completion_wants_trailing_space(text: str) -> bool:
     """True when accepting this buffer text should append a space so the next
     completion menu (subcommand / enum args) opens immediately."""
     if not text or text.endswith(" "):
         return False
-    if text in ARG_CHOICES or text in ("/goal", "/workflow", "/model", "/use"):
+    if text in ARG_CHOICES or text in ("/goal", "/workflow", "/model", "/use", "/resume"):
         return True
     if text.startswith("/goal "):
         sub = text[len("/goal ") :]
@@ -1161,7 +1255,7 @@ class ChatApp:
         self.orchestrator = orchestrator
         self.capture = _ConsoleCapture()
         self.output = _OutputPane()
-        self._history = InMemoryHistory()
+        self._history = self._make_input_history()
         self._thinking = {"flag": False, "start": 0.0, "gerund": "", "last_swap": 0.0}
         self._cancel_event: threading.Event | None = None
         self._approving: dict = {"flag": False, "prompt": "", "result": False, "event": None}
@@ -1177,6 +1271,7 @@ class ChatApp:
         self._buf = Buffer(
             history=self._history,
             multiline=False,
+            enable_history_search=True,
             read_only=Condition(lambda: self._approving["flag"]),
             completer=SlashCommandCompleter(orchestrator),
             complete_while_typing=True,
@@ -1194,6 +1289,51 @@ class ChatApp:
         )
 
     # --- setup -----------------------------------------------------------
+
+    def _make_input_history(self):  # type: ignore[no-untyped-def]
+        """Session + on-disk input history for ↑/↓ recall."""
+        try:
+            from prompt_toolkit.history import FileHistory
+
+            from reidx.config.storage import storage_root
+
+            path = storage_root() / "input_history"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Touch so FileHistory can open on first run.
+            if not path.exists():
+                path.write_text("", encoding="utf-8")
+            return FileHistory(str(path))
+        except Exception:  # noqa: BLE001 - history is convenience, never block launch
+            return InMemoryHistory()
+
+    def _commit_input_to_history(self, text: str) -> None:
+        """Save submitted text so ↑ walks prior prompts immediately.
+
+        Must be called **after** `buffer.reset()` — reset wipes working_lines.
+        We append to the History store, then rebuild working_lines from it so
+        `auto_up` / `history_backward` see the new entry right away.
+        """
+        text = (text or "").rstrip("\n")
+        if not text.strip():
+            return
+        buf = self._buf
+        # 1) Durable history (skip consecutive duplicates).
+        try:
+            strings = buf.history.get_strings()
+            if not strings or strings[-1] != text:
+                buf.history.append_string(text)
+        except Exception:  # noqa: BLE001
+            pass
+        # 2) Working lines for ↑/↓ this session (oldest … newest, then draft "").
+        try:
+            from collections import deque
+
+            entries = list(buf.history.get_strings())
+            wl = entries + [""]
+            buf._working_lines = deque(wl)
+            buf.working_index = len(wl) - 1
+        except Exception:  # noqa: BLE001
+            pass
 
     def start(self) -> None:
         if self.orchestrator.state is None:
@@ -1350,7 +1490,9 @@ class ChatApp:
             frags += [
                 (color, f"  {glyph} "),
                 ("#ffffff bold", name),
-                (" "),
+                # Must be a (style, text) pair — a bare (" ") is just the string
+                # " " in Python and crashes prompt_toolkit split_lines unpack.
+                ("", " "),
                 (f"{color}", status_text),
                 ("#9e9e9e", f" {elapsed}s"),
             ]
@@ -1631,6 +1773,9 @@ class ChatApp:
         return f"effort:{effort}"
 
     def _build_status_fragments(self):  # type: ignore[no-untyped-def]
+        """One compact footer line that fits the terminal (no wrap/clip mess)."""
+        from reidx.ui.theme import content_width
+
         status = self._status()
         window = status.get("context_window", 0)
         used = status.get("tokens_used", 0)
@@ -1638,24 +1783,43 @@ class ChatApp:
         usage = f"{fmt_tokens(used)}/{fmt_tokens(window)} ({pct})" if window else fmt_tokens(used)
         mode = status.get("mode", "—")
         mode_color = _MODE_COLOR.get(mode, "#9e9e9e")
-        sep = ("#6c6c6c", "  ·  ")
-        frags = [
-            ("#ff5f5f bold", f"  {APP_NAME}"), sep,
-            (f"{mode_color} bold", mode), sep,
-            ("#9e9e9e", status.get("model", "—")), sep,
-            ("#9e9e9e", self._format_effort_status(status)), sep,
-            ("#9e9e9e", usage), sep,
-            ("#9e9e9e", short_path(status.get("workspace", "—"))), sep,
-            ("#9e9e9e", f"{status.get('tasks', 0)} tasks"),
+        model = str(status.get("model") or "—")
+        # Truncate long model ids so the bar stays one line on narrow panes.
+        cols = content_width(margin=4)
+        if len(model) > 28:
+            model = model[:25] + "…"
+        sep = ("#6c6c6c", " · ")
+        # Compact layout matching a clean full-width TUI footer.
+        frags: list = [
+            ("#ff5f5f bold", f" {APP_NAME}"),
+            sep,
+            (f"{mode_color} bold", mode),
+            sep,
+            ("#9e9e9e", model),
+            sep,
+            ("#9e9e9e", self._format_effort_status(status)),
+            sep,
+            ("#9e9e9e", usage),
         ]
-        # Session spend estimate (from /cost ledger).
+        # Workspace: last folder name is enough (avoid "gith" truncation of long paths).
+        wp_raw = str(status.get("workspace") or "")
+        if wp_raw and wp_raw != "—":
+            try:
+                from pathlib import Path as _P
+
+                wp = _P(wp_raw).name or short_path(wp_raw, keep=1)
+            except Exception:  # noqa: BLE001
+                wp = short_path(wp_raw, keep=1)
+            if len(wp) > 24:
+                wp = "…" + wp[-23:]
+            frags += [sep, ("#9e9e9e", wp)]
         st = self.orchestrator.state
         if st is not None and st.costs.total_usd > 0:
             from reidx.runtime.cost import fmt_usd
 
             frags += [sep, ("#9e9e9e", fmt_usd(st.costs.total_usd))]
         if not self.output.pinned:
-            frags += [sep, ("#ffd75f bold", "scrolled ↑ (scroll down to return)")]
+            frags += [sep, ("#ffd75f bold", "↑ scroll")]
         return frags
 
     def _selection_status_fragments(self):  # type: ignore[no-untyped-def]
@@ -2061,6 +2225,26 @@ class ChatApp:
             self.output.toggle_expanded()
             self.app.invalidate()
 
+        # Input history: ↑ / ↓ (and Ctrl+P / Ctrl+N) walk prior prompts.
+        # When the "/" completion menu is open, leave arrows to the default
+        # completion navigator (don't steal history while picking /resume ids).
+        # Shift+↑/↓ still scrolls the transcript.
+        @kb.add("up", filter=can_edit & ~is_completing & ~is_palette)
+        def _history_up(event) -> None:  # type: ignore[no-untyped-def]
+            event.current_buffer.auto_up(count=event.arg)
+
+        @kb.add("down", filter=can_edit & ~is_completing & ~is_palette)
+        def _history_down(event) -> None:  # type: ignore[no-untyped-def]
+            event.current_buffer.auto_down(count=event.arg)
+
+        @kb.add("c-p", filter=can_edit & ~is_completing & ~is_palette)
+        def _history_prev(event) -> None:  # type: ignore[no-untyped-def]
+            event.current_buffer.auto_up(count=event.arg)
+
+        @kb.add("c-n", filter=can_edit & ~is_completing & ~is_palette)
+        def _history_next(event) -> None:  # type: ignore[no-untyped-def]
+            event.current_buffer.auto_down(count=event.arg)
+
         # Keyboard scrollback for the transcript pane. A page is roughly the
         # output window's height; we don't have it here without the renderer,
         # so a fixed page of 15 lines keeps PageUp/PageDown predictable.
@@ -2164,7 +2348,9 @@ class ChatApp:
         if not text.strip():
             return
         prefix_len = self._deepread_prefix_len()
-        self._buf.reset()
+        # Clear the box first (reset wipes working_lines), then rebuild history.
+        self._buf.reset(append_to_history=False)
+        self._commit_input_to_history(text)
         if prefix_len:
             task = self._expand_pastes(text[prefix_len:].lstrip())
             self._pastes.clear()
@@ -2233,6 +2419,7 @@ class ChatApp:
                 await self._run_workflow(outcome.split(":", 1)[1])
             return
 
+        self.capture.sync_width()
         self._append_output(lambda: render.print_user(text))
         self._thinking["flag"] = True
         self._thinking["start"] = time.monotonic()
@@ -2246,20 +2433,34 @@ class ChatApp:
         approver = self._make_approver()
         assert self._loop is not None
 
-        def _on_text_delta(chunk: str) -> None:
-            # Worker thread → schedule UI redraw on the asyncio loop.
+        def _append_stream_chunk(chunk: str) -> None:
+            """UI-thread only: own live_stream + redraw (throttled)."""
             if not chunk:
                 return
             self.output.live_stream += chunk
-            # Cap live buffer so a runaway stream can't blow memory in the pane.
             if len(self.output.live_stream) > 200_000:
                 self.output.live_stream = self.output.live_stream[-160_000:]
+            now = time.monotonic()
+            last = getattr(self, "_stream_last_invalidate", 0.0)
+            # ~25 Hz max so fast token streams don't starve the event loop.
+            if now - last >= 0.04 or len(self.output.live_stream) < 40:
+                self._stream_last_invalidate = now
+                if self.app.is_running:
+                    self.app.invalidate()
+
+        def _on_text_delta(chunk: str) -> None:
+            # Worker thread → marshal buffer update onto the asyncio/UI loop.
+            if not chunk:
+                return
             loop = self._loop
             if loop is not None and self.app.is_running:
                 try:
-                    loop.call_soon_threadsafe(self.app.invalidate)
+                    loop.call_soon_threadsafe(_append_stream_chunk, chunk)
+                    return
                 except Exception:  # noqa: BLE001
                     pass
+            # Fallback if loop not ready (shouldn't happen mid-turn).
+            _append_stream_chunk(chunk)
 
         try:
             result = await self._loop.run_in_executor(

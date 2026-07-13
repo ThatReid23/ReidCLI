@@ -13,6 +13,10 @@ TIMEOUT_SECONDS = 120
 # Model listing can be huge/slow (NVIDIA NIM etc.) — never block the TUI for 120s.
 MODELS_TIMEOUT_SECONDS = 8
 
+# Cloudflare (and similar) often block Python-urllib's default User-Agent with
+# HTTP 403 + HTML ("error code: 1010"). Always send a normal client identity.
+DEFAULT_USER_AGENT = "ReidX/2 (+https://github.com/reidx; urllib)"
+
 _SSL_CONTEXT: ssl.SSLContext | None = None
 
 _HTTP_HINTS: dict[int, str] = {
@@ -24,6 +28,22 @@ _HTTP_HINTS: dict[int, str] = {
     502: "Try again later.",
     503: "Try again later.",
 }
+
+
+def _merge_headers(headers: dict[str, str] | None) -> dict[str, str]:
+    """Apply default User-Agent / Accept unless the caller overrides them."""
+    out = {
+        "user-agent": DEFAULT_USER_AGENT,
+        "accept": "application/json",
+    }
+    if headers:
+        # Caller keys win (case-insensitive for overrides of defaults).
+        lower_map = {k.lower(): k for k in headers}
+        for def_k, _def_v in list(out.items()):
+            if def_k in lower_map:
+                out.pop(def_k, None)
+        out.update(headers)
+    return out
 
 
 def _build_ssl_context() -> ssl.SSLContext:
@@ -82,9 +102,21 @@ def _extract_api_message(err_body: str) -> str:
 
 def _http_error(code: int, err_body: str) -> ProviderError:
     """Build a single clean line for the TUI: `HTTP 404: Application not found`."""
+    raw = (err_body or "").strip()
+    # Cloudflare / HTML error pages — don't dump the whole document into the TUI.
+    low = raw.lower()
+    if raw.startswith("<!") or "<html" in low or "error code:" in low:
+        if "1010" in raw:
+            msg = "blocked by Cloudflare (bot protection) — update ReidX / check User-Agent"
+        elif "1020" in raw:
+            msg = "blocked by Cloudflare firewall"
+        else:
+            msg = "HTML error page from host (not a JSON API response)"
+        hint = _HTTP_HINTS.get(code)
+        text = f"HTTP {code}: {msg}" + (f" — {hint}" if hint else "")
+        return ProviderError(text, status_code=code)
+
     msg = _extract_api_message(err_body)
-    # Prefer the API's own message; only append a short hint when it's useful
-    # and not already implied by the message text.
     hint = _HTTP_HINTS.get(code)
     if hint and hint.lower() not in msg.lower():
         text = f"HTTP {code}: {msg} — {hint}"
@@ -100,7 +132,7 @@ def post_json(url: str, payload: dict, headers: dict[str, str], timeout: int = T
     those so the TUI session stays up and shows an inline error.
     """
     body = json.dumps(payload).encode("utf-8")
-    hdrs = {"content-type": "application/json", **headers}
+    hdrs = _merge_headers({"content-type": "application/json", **(headers or {})})
     req = urllib.request.Request(url, data=body, headers=hdrs, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx()) as resp:
@@ -110,7 +142,10 @@ def post_json(url: str, payload: dict, headers: dict[str, str], timeout: int = T
         raise _http_error(exc.code, err_body) from None
     except urllib.error.URLError as exc:
         raise ProviderError(f"connection error: {exc.reason if hasattr(exc, 'reason') else exc}") from None
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ProviderError(f"invalid JSON from provider: {exc}") from None
 
 
 def iter_sse_json(
@@ -125,11 +160,13 @@ def iter_sse_json(
     Used by OpenAI-compatible chat streaming (NVIDIA NIM, OpenAI, Groq, …).
     """
     body = json.dumps(payload).encode("utf-8")
-    hdrs = {
-        "content-type": "application/json",
-        "accept": "text/event-stream",
-        **headers,
-    }
+    hdrs = _merge_headers(
+        {
+            "content-type": "application/json",
+            "accept": "text/event-stream",
+            **(headers or {}),
+        }
+    )
     req = urllib.request.Request(url, data=body, headers=hdrs, method="POST")
     try:
         resp = urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx())
@@ -170,12 +207,13 @@ def iter_sse_json(
 
 
 def get_json(url: str, headers: dict[str, str], timeout: int = TIMEOUT_SECONDS) -> dict:
-    req = urllib.request.Request(url, headers=headers, method="GET")
+    hdrs = _merge_headers(headers)
+    req = urllib.request.Request(url, headers=hdrs, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx()) as resp:
             # Cap body size so a multi‑MB model catalog cannot freeze the process.
             raw = resp.read(8_000_000).decode("utf-8", errors="replace")
-    except TimeoutError as exc:
+    except TimeoutError:
         raise ProviderError(f"connection error: timed out after {timeout}s") from None
     except urllib.error.HTTPError as exc:
         err_body = exc.read().decode("utf-8", errors="replace")[:500]

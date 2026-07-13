@@ -22,7 +22,6 @@ from reidx.runtime.compact import (
     DEFAULT_KEEP_USER_TURNS,
     CompactResult,
     compact_messages,
-    context_window_for_model,
     estimate_tokens,
     should_auto_compact,
 )
@@ -99,16 +98,16 @@ class Orchestrator:
                 self.state.session.model = ""
             self.session_store.update(self.state.session)
         self._persist_default_provider(resolved)
-        # Context from cache only — never block /use on a multi‑MB /models dump.
+        # Auto-update context meter for the active model (known table + cache).
         try:
-            from reidx.provider.context_windows import refresh_context_from_provider
+            from reidx.provider.context_windows import bind_model_context
 
             mid = ""
             if self.state is not None:
                 mid = self.state.session.model or ""
             mid = mid or getattr(provider, "default_model", "") or ""
             if mid and self.state is not None:
-                window = refresh_context_from_provider(provider, mid, network=False)
+                window = bind_model_context(mid, provider, network=False)
                 self.state.session.context_window = window
                 self.session_store.update(self.state.session)
         except Exception:  # noqa: BLE001
@@ -151,13 +150,13 @@ class Orchestrator:
         self.session_store.create(session)
         self.state = RuntimeState(session=session)
         self._init_session_extras()
-        # Context from cache/hints only — never hang startup on /models.
+        # Auto-set context window from model id / known table (no network hang).
         try:
-            from reidx.provider.context_windows import refresh_context_from_provider
+            from reidx.provider.context_windows import bind_model_context
 
             if session.model:
-                session.context_window = refresh_context_from_provider(
-                    self.provider, session.model, network=False
+                session.context_window = bind_model_context(
+                    session.model, self.provider, network=False
                 )
                 self.session_store.update(session)
         except Exception:  # noqa: BLE001

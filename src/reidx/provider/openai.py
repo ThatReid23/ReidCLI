@@ -224,15 +224,33 @@ class OpenAIProvider(BaseProvider):
 
         from reidx.provider.base import ProviderError
 
+        stream_error: ProviderError | None = None
         try:
             _consume(iter_sse_json(url, payload, self._headers()))
-        except ProviderError:
-            # Some proxies reject stream_options — retry once without it.
-            if "stream_options" in payload and not text_parts and not tc_acc:
+        except ProviderError as exc:
+            msg = str(exc).lower()
+            # Retry once only when stream_options is likely unsupported — not on 401/403.
+            retryable = (
+                "stream_options" in payload
+                and not text_parts
+                and not tc_acc
+                and (
+                    "stream_options" in msg
+                    or "unknown" in msg
+                    or "unsupported" in msg
+                    or "unexpected" in msg
+                    or (exc.status_code is not None and 400 <= exc.status_code < 500
+                        and exc.status_code not in (401, 403, 404, 429))
+                )
+            )
+            if retryable:
                 payload.pop("stream_options", None)
-                _consume(iter_sse_json(url, payload, self._headers()))
-            elif not text_parts and not tc_acc:
-                raise
+                try:
+                    _consume(iter_sse_json(url, payload, self._headers()))
+                except ProviderError as exc2:
+                    stream_error = exc2
+            else:
+                stream_error = exc
 
         tool_calls: list[ToolCall] = []
         for idx in sorted(tc_acc):
@@ -252,11 +270,25 @@ class OpenAIProvider(BaseProvider):
                 )
             )
 
+        # Mid-stream failure with no content → hard error (agent soft-catches).
+        if stream_error is not None and not text_parts and not tool_calls:
+            raise stream_error
+
+        text = "".join(text_parts)
+        # Partial stream then error: surface partial text + error note (don't pretend success).
+        if stream_error is not None:
+            note = f"\n\n[stream interrupted: {stream_error}]"
+            text = (text + note) if text else f"[stream interrupted: {stream_error}]"
+            if not tool_calls:
+                # Prefer soft error path when nothing useful was produced.
+                if not text_parts:
+                    raise stream_error
+
         return ProviderResponse(
-            text="".join(text_parts),
+            text=text,
             tool_calls=tool_calls,
             usage=usage,
-            stop_reason=finish or "stop",
+            stop_reason=("error" if stream_error else (finish or "stop")),
         )
 
     def fetch_models_detailed(self, *, timeout: int = MODELS_TIMEOUT_SECONDS) -> list[dict]:

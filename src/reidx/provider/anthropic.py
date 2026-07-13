@@ -16,7 +16,7 @@ from typing import Any
 
 from reidx.provider._http import MODELS_TIMEOUT_SECONDS, get_json, post_json
 from reidx.provider.base import BaseProvider, Message, ProviderResponse, ToolCall, Usage
-from reidx.provider.context_windows import ingest_models_payload, remember_context
+from reidx.provider.context_windows import ingest_models_payload
 
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 API_VERSION = "2023-06-01"
