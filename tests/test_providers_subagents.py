@@ -60,11 +60,11 @@ def test_load_into_registers_provider(tmp_path: Path) -> None:
 
 def test_database_provider_overrides_incomplete_settings(tmp_path: Path) -> None:
     """settings.json name-only entries must not block providers.db (WinError 10061 bug)."""
-    from reidx.config.models import Config, ProviderConfig, default_config
+    from reidx.config.models import ProviderConfig, default_config
     from reidx.provider.registry import default_registry
     from reidx.provider.store import load_from_database
-    from reidx.provider_manager.database import ProviderDatabase, StoredKey, StoredProvider
     from reidx.provider_manager import keychain
+    from reidx.provider_manager.database import ProviderDatabase, StoredKey, StoredProvider
 
     # Incomplete settings-style config (no base_url) — previously became localhost:8080
     cfg = default_config()
@@ -154,7 +154,11 @@ def test_resolve_nvidia_alias_to_display_name() -> None:
 
 
 def test_normalize_openai_base_url_no_double_v1() -> None:
-    from reidx.provider.openai import OpenAICompatibleProvider, OpenAIProvider, normalize_openai_base_url
+    from reidx.provider.openai import (
+        OpenAICompatibleProvider,
+        OpenAIProvider,
+        normalize_openai_base_url,
+    )
 
     assert normalize_openai_base_url("https://api.openai.com") == "https://api.openai.com/v1"
     assert normalize_openai_base_url("https://api.x.ai/v1") == "https://api.x.ai/v1"

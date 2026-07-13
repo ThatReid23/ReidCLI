@@ -124,6 +124,6 @@ class OllamaProvider(BaseProvider):
                         except (TypeError, ValueError):
                             continue
                         if n > 0:
-                            remember_context(str(name), n)
+                            remember_context(str(name), n, from_api=True)
                             break
         return sorted(models)

@@ -21,7 +21,7 @@ from typing import Any
 
 from reidx.diagnostics.logger import get_logger
 from reidx.policy.engine import PolicyEngine
-from reidx.provider.base import BaseProvider, Message, ProviderError, ProviderResponse, ToolCall
+from reidx.provider.base import BaseProvider, Message, ProviderError, ToolCall
 from reidx.runtime.effort_auto import resolve_effort
 from reidx.runtime.reasoning import split_reasoning, system_prompt_suffix
 from reidx.runtime.state import RuntimeState
@@ -30,7 +30,9 @@ from reidx.tools.registry import ToolRegistry
 
 log = get_logger("reidx.agent")
 
-MAX_STEPS = 8
+# Allow enough tool rounds for multi-file investigation without burning out
+# on "step budget exhausted" after a short explore (was 8).
+MAX_STEPS = 16
 # Prefix used by orchestrator/UI to detect soft provider failures without
 # relying on exception propagation through the TUI worker thread.
 PROVIDER_ERROR_PREFIX = "[provider error] "
@@ -45,7 +47,13 @@ BASE_SYSTEM_PROMPT = (
     "Use paths exactly as given in the environment context below — do not "
     "translate them to a different OS (no /mnt/... on Windows, no drive "
     "letters on Linux). If a path check prompts the user, they will approve "
-    "or deny it; you never need to guess an alternative path."
+    "or deny it; you never need to guess an alternative path. "
+    "If the status-bar max context (used/max) is wrong for your model, call "
+    "set_context_window with the correct max tokens (e.g. 1000000 or \"1M\" "
+    "for GLM-5.2) — do not burn many tool steps investigating the meter. "
+    "You can manage backends like OpenCode: list_provider_catalog → "
+    "connect_provider (user approves keys) → use_provider / set_model; "
+    "list_connected_providers shows what is registered."
 )
 
 
@@ -240,7 +248,24 @@ class Agent:
                 final_text = final_text or "[cancelled by user]"
                 break
         else:
-            final_text = final_text or "[agent] step budget exhausted without a final answer."
+            # for/else: step budget hit with no break — synthesize a useful wrap-up
+            # from tool results instead of a dead-end one-liner.
+            if not final_text or final_text.startswith("[agent]"):
+                bits: list[str] = [
+                    f"[agent] step budget exhausted after {max_steps} model rounds "
+                    f"({len(tool_log)} tool call(s))."
+                ]
+                oks = [t for t in tool_log if t.get("ok")]
+                fails = [t for t in tool_log if not t.get("ok")]
+                if oks:
+                    names = ", ".join(dict.fromkeys(t["name"] for t in oks))
+                    bits.append(f"Succeeded: {names}.")
+                if fails:
+                    names = ", ".join(dict.fromkeys(t["name"] for t in fails))
+                    bits.append(f"Failed: {names}.")
+                bits.append("Summarize from tool results above, or continue in a new message.")
+                final_text = " ".join(bits)
+                state.messages.append(Message(role="assistant", content=final_text))
 
         state.turns += 1
         return final_text, tool_log

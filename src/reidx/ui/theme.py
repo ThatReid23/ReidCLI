@@ -14,6 +14,10 @@ from pathlib import Path
 from rich import box
 from rich.text import Text
 
+# Context windows live in provider.context_windows (full table + live API cache).
+# Re-export so existing `from reidx.ui.theme import context_window_for` keeps working.
+from reidx.provider.context_windows import DEFAULT_CONTEXT_WINDOW, context_window_for  # noqa: F401
+
 # Brand.
 APP_NAME = "ReidX"
 
@@ -82,14 +86,34 @@ MODE_STYLE = {
 
 
 # Visual constants.
-MAX_WIDTH = 80  # constrain panels/tables so they don't span ultra-wide terminals
+# Soft cap for tables/panels. Prefer `content_width()` which tracks the live
+# terminal so wide Windows Terminal panes use the full width (like a native ls).
+MAX_WIDTH = 120
+
+
+def terminal_size(fallback: tuple[int, int] = (100, 30)) -> tuple[int, int]:
+    """Current terminal (cols, rows)."""
+    import shutil
+
+    try:
+        cols, rows = shutil.get_terminal_size(fallback=fallback)
+        return max(40, int(cols)), max(10, int(rows))
+    except Exception:  # noqa: BLE001
+        return fallback
+
+
+def content_width(*, margin: int = 2, cap: int | None = None) -> int:
+    """Width available for Rich content inside the TUI output pane."""
+    cols, _ = terminal_size()
+    w = max(40, cols - max(0, margin))
+    if cap is not None:
+        w = min(w, cap)
+    return w
+
 
 # Context windows live in provider.context_windows (full table + live API cache).
 # Re-export so existing `from reidx.ui.theme import context_window_for` keeps working.
-from reidx.provider.context_windows import (  # noqa: E402
-    DEFAULT_CONTEXT_WINDOW,
-    context_window_for,
-)
+from reidx.provider.context_windows import DEFAULT_CONTEXT_WINDOW, context_window_for  # noqa: F401
 
 
 def fmt_tokens(n: int) -> str:

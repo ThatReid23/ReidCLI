@@ -42,10 +42,19 @@ from reidx.ui.theme import (
     SUCCESS,
     TREE,
     WARN,
+    content_width,
     context_window_for,
     fmt_tokens,
     short_path,
 )
+
+
+def _table_width() -> int:
+    """Use the live terminal width so tables fill the pane like a native listing."""
+    try:
+        return min(max(content_width(margin=2), 40), max(MAX_WIDTH, content_width(margin=2)))
+    except Exception:  # noqa: BLE001
+        return MAX_WIDTH
 
 # Do NOT permanently reconfigure stdout/stderr here — that sticks the parent
 # PowerShell session on UTF-8 and can break Oh My Posh / profile themes.
@@ -126,7 +135,7 @@ def banner() -> None:
         ("  cwd: ", DIM),
         (str(Path.cwd()), DIM),
     )
-    panel = Panel(body, box=BOX, border_style=PRIMARY, padding=(0, 1), width=MAX_WIDTH)
+    panel = Panel(body, box=BOX, border_style=PRIMARY, padding=(0, 1), width=_table_width())
 
     grid = Table.grid(padding=(0, 2))
     grid.add_column()
@@ -209,7 +218,15 @@ def print_thinking(text: str) -> None:
 
 
 def print_assistant(text: str) -> None:
-    """Markdown assistant output hanging under a ⏺ bullet."""
+    """Markdown assistant output hanging under a ⏺ bullet.
+
+    Console width tracks the terminal so wide tables (Name / Type listings)
+    fill the pane instead of a fixed 80-col column.
+    """
+    try:
+        console.width = content_width(margin=2)
+    except Exception:  # noqa: BLE001
+        pass
     console.print(_bullet_grid(Text(BULLET, style=PRIMARY), Markdown(text)))
 
 
@@ -238,7 +255,7 @@ def print_tasks(tasks: list[Task]) -> None:
     if not tasks:
         console.print(Text("no tasks", style=DIM))
         return
-    table = Table(title="tasks", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=MAX_WIDTH)
+    table = Table(title="tasks", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=_table_width())
     table.add_column("id", style=DIM, width=12)
     table.add_column("status", width=12)
     table.add_column("title")
@@ -279,7 +296,7 @@ def print_goals(goals: list[Goal], active_goal_id: str | None = None) -> None:
     if not goals:
         console.print(Text("no goals", style=DIM))
         return
-    table = Table(title="goals", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=MAX_WIDTH)
+    table = Table(title="goals", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=_table_width())
     table.add_column("", width=2)
     table.add_column("id", style=DIM, width=12)
     table.add_column("status", width=12)
@@ -316,10 +333,10 @@ def print_goal(goal: Goal) -> None:
     body.add_row("evidence", f"{evidence_done}/{len(goal.evidence)} satisfied" if goal.evidence else "(none)")
     body.add_row("nodes", f"{len(goal.nodes)}")
     body.add_row("tasks", f"{len(goal.task_ids)} linked")
-    console.print(Panel(Group(header, body), box=BOX, border_style=PRIMARY, width=MAX_WIDTH))
+    console.print(Panel(Group(header, body), box=BOX, border_style=PRIMARY, width=_table_width()))
 
     if goal.evidence:
-        table = Table(title="evidence", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=MAX_WIDTH)
+        table = Table(title="evidence", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=_table_width())
         table.add_column("#", style=DIM, width=4)
         table.add_column("done", width=6)
         table.add_column("description")
@@ -334,7 +351,7 @@ def print_goal(goal: Goal) -> None:
         console.print(table)
 
     if goal.constraints:
-        table = Table(title="constraints", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=MAX_WIDTH)
+        table = Table(title="constraints", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=_table_width())
         table.add_column("kind", style=DIM, width=12)
         table.add_column("description")
         for constraint in goal.constraints:
@@ -377,37 +394,43 @@ def print_goal_tree(goal: Goal) -> None:
     console.print(root)
 
 
-def print_sessions(sessions: list[Session]) -> None:
+def print_sessions(sessions: list[Session], *, message_counts: dict[str, int] | None = None) -> None:
     if not sessions:
         console.print(Text("no sessions", style=DIM))
         return
-    table = Table(title="sessions", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=MAX_WIDTH)
+    table = Table(title="sessions", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=_table_width())
     table.add_column("id", style=DIM, width=14)
     table.add_column("status", width=10)
+    table.add_column("msgs", width=6)
     table.add_column("title")
+    table.add_column("model", style=DIM, width=18)
     table.add_column("updated", width=12)
-    table.add_column("workspace", style=DIM)
     now = datetime.now(UTC)
     for s in sessions:
         color = STATUS_STYLE.get(s.status.value, "white")
         age = now - s.updated_at
         mins = int(age.total_seconds() // 60)
         when = f"{mins}m ago" if mins < 60 else f"{mins // 60}h ago"
+        n = ""
+        if message_counts is not None:
+            n = str(message_counts.get(s.id, 0))
         table.add_row(
             s.id,
             Text(s.status.value, style=f"bold {color}"),
-            s.title,
+            n,
+            s.title or "untitled",
+            (s.model or "")[:18],
             when,
-            str(s.workspace),
         )
     console.print(table)
+    console.print(Text("  /resume <id>  to load one (type /resume  for a pick list)", style=DIM))
 
 
 def print_workflows(workflows: list) -> None:  # type: ignore[no-untyped-def]
     if not workflows:
         console.print(Text("no workflows", style=DIM))
         return
-    table = Table(title="workflows", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=MAX_WIDTH)
+    table = Table(title="workflows", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=_table_width())
     table.add_column("name", style="bold", width=18)
     table.add_column("steps", width=6)
     table.add_column("description")
@@ -430,7 +453,7 @@ def print_providers(records, active_name: str, extra_names: list[str]) -> None: 
     or `anthropic` picked up from env vars) — those show as kind=built-in.
     `active_name` is the current session provider (highlighted).
     """
-    table = Table(title="providers", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=MAX_WIDTH)
+    table = Table(title="providers", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=_table_width())
     table.add_column("name", style="bold", width=18)
     table.add_column("kind", width=20)
     table.add_column("model", width=22)
@@ -448,7 +471,7 @@ def print_providers(records, active_name: str, extra_names: list[str]) -> None: 
 def print_permissions(policy: PolicyEngine) -> None:
     """Structured permissions view using a table for readability."""
     cfg = policy.config.policy
-    table = Table(title="permissions", box=BOX, show_header=False, border_style=PRIMARY, padding=(0, 1), width=MAX_WIDTH)
+    table = Table(title="permissions", box=BOX, show_header=False, border_style=PRIMARY, padding=(0, 1), width=_table_width())
     table.add_column("key", style=DIM, width=18)
     table.add_column("value")
     mode_color = MODE_STYLE.get(policy.mode.value, DIM)
@@ -468,20 +491,40 @@ def print_transcript(messages: list[Message], n: int = 20) -> None:
     if not messages:
         console.print(Text("no transcript", style=DIM))
         return
-    for m in messages[-n:]:
+    # Prefer showing user/assistant turns; keep system only if that's all we have.
+    body = [m for m in messages if m.role != "system"]
+    if not body:
+        body = list(messages)
+    for m in body[-n:]:
         icon = ROLE_ICON.get(m.role, "·")
         style = ROLE_STYLE.get(m.role, "white")
         if m.tool_calls:
             calls = ", ".join(c.name for c in m.tool_calls)
-            console.print(Text.assemble((f"{icon} ", style), (f"{m.role} ", f"bold {style}"), (f"tools: {calls}", DIM)))
+            console.print(
+                Text.assemble(
+                    (f"{icon} ", style),
+                    (f"{m.role} ", f"bold {style}"),
+                    (f"tools: {calls}", DIM),
+                )
+            )
+            if (m.content or "").strip():
+                text = m.content[:400] + ("…" if len(m.content) > 400 else "")
+                console.print(Text(f"  {text}", style=DIM))
         else:
-            text = m.content[:300] + ("…" if len(m.content) > 300 else "")
-            console.print(Text.assemble((f"{icon} ", style), (f"{m.role} ", f"bold {style}"), (text, "white")))
+            # Longer clip so resumed chats are actually readable.
+            text = m.content[:800] + ("…" if len(m.content) > 800 else "")
+            console.print(
+                Text.assemble(
+                    (f"{icon} ", style),
+                    (f"{m.role} ", f"bold {style}"),
+                    (text, "white"),
+                )
+            )
 
 
 def print_tools(definitions: list) -> None:  # type: ignore[no-untyped-def]
     """Grouped tool listing with risk badges."""
-    table = Table(title="tools", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=MAX_WIDTH)
+    table = Table(title="tools", box=BOX, show_header=True, header_style=f"bold {PRIMARY}", border_style=PRIMARY, width=_table_width())
     table.add_column("name", style="bold", width=18)
     table.add_column("risk", width=8)
     table.add_column("description")
