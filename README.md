@@ -34,7 +34,7 @@ Requires Python 3.12+ on `PATH`. The package pip-installs on `npm install` and
 seeds `~/.reidcli/settings.json`.
 
 ```powershell
-npm install -g reidx
+npm install -g @agxnte/reidx
 ```
 
 ### Option B: install from source
